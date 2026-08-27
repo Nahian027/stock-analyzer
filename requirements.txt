@@ -1,0 +1,10 @@
+streamlit
+streamlit-autorefresh
+pandas
+numpy
+plotly
+requests
+urllib3
+pypdf
+bdshare
+beautifulsoup4
