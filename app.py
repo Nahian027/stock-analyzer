@@ -9,11 +9,22 @@ import requests
 import urllib3
 import io
 import re
-import pypdf
 import bdshare
 from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Bangladesh Standard Time (BST, UTC+6) timezone helper
+BST_TZ = dt.timezone(dt.timedelta(hours=6))
+
+def get_bangladesh_now() -> dt.datetime:
+    """Returns the exact current datetime in Bangladesh Standard Time (BST, UTC+6)."""
+    return dt.datetime.now(BST_TZ)
+
+def get_bangladesh_today() -> dt.date:
+    """Returns the current date in Bangladesh Standard Time (BST, UTC+6)."""
+    return get_bangladesh_now().date()
+
 
 # Page configuration
 st.set_page_config(
@@ -238,7 +249,7 @@ WATCHLIST_STOCKS = [
 
 def get_dse_market_status():
     """Computes Bangladesh Standard Time (BST) date, time, and DSE market open/closed status."""
-    now = dt.datetime.now()
+    now = get_bangladesh_now()
     weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
     # DSE trading days: Sunday (6), Monday (0), Tuesday (1), Wednesday (2), Thursday (3)
     is_trading_day = weekday in [6, 0, 1, 2, 3]
@@ -339,7 +350,7 @@ def get_live_market_feeds():
         "stocknow_count": 0,
         "dse_ok": False,
         "dse_count": 0,
-        "fetch_time": dt.datetime.now().strftime("%I:%M:%S %p")
+        "fetch_time": get_bangladesh_now().strftime("%I:%M:%S %p")
     }
     
     stocknow_quotes = {}
@@ -433,9 +444,10 @@ def get_live_market_feeds():
 # ----------------- DSE LIVE INDICES & MARKET STATS FETCHER ----------------- #
 
 @st.cache_data(ttl=15)
-def get_dse_market_indices():
+def get_dse_market_indices(unified_quotes: dict | None = None):
     """
-    Fetches real-time DSEX, DSES, and DS30 indices and market breadth from DSE official homepage.
+    Fetches real-time DSEX, DSES, and DS30 indices and market breadth using
+    multi-source resilient fallback (StockNow API -> DSE Scraper -> bdshare historical market info).
     """
     indices = {
         "DSEX": {"name": "DSEX Broad Index", "value": 0.0, "change": 0.0, "pct_change": 0.0},
@@ -443,51 +455,141 @@ def get_dse_market_indices():
         "DS30": {"name": "DS30 Blue-Chip Index", "value": 0.0, "change": 0.0, "pct_change": 0.0},
         "stats": {"trade": 0, "volume": 0, "value_mn": 0.0, "advanced": 0, "declined": 0, "unchanged": 0}
     }
+
+    # 1. Primary Source: StockNow Live API Indices
     try:
-        r = requests.get("https://www.dsebd.org/index.php", headers=HTTP_HEADERS, verify=False, timeout=6)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.content, "html.parser")
-            for mid in soup.find_all("div", class_="midrow"):
-                c1 = mid.find("div", class_="m_col-1")
-                c2 = mid.find("div", class_="m_col-2")
-                c3 = mid.find("div", class_="m_col-3")
-                c4 = mid.find("div", class_="m_col-4")
-                if c1 and c2 and c3 and c4:
-                    name_txt = c1.get_text(strip=True).upper()
-                    try:
-                        val = float(c2.get_text(strip=True).replace(",", ""))
-                        chg = float(c3.get_text(strip=True).replace(",", ""))
-                        pct = float(c4.get_text(strip=True).replace("%", "").replace(",", "").strip())
-                        if "DSEX" in name_txt or "DSE X" in name_txt:
-                            if indices["DSEX"]["value"] == 0.0:
-                                indices["DSEX"].update({"value": val, "change": chg, "pct_change": pct})
-                        elif "DSES" in name_txt or "DSE S" in name_txt:
-                            if indices["DSES"]["value"] == 0.0:
-                                indices["DSES"].update({"value": val, "change": chg, "pct_change": pct})
-                        elif "DS30" in name_txt or "DSE 30" in name_txt or "DSE30" in name_txt:
-                            if indices["DS30"]["value"] == 0.0:
-                                indices["DS30"].update({"value": val, "change": chg, "pct_change": pct})
-                    except Exception:
-                        pass
-                
-                # Check stats
-                cwid = mid.find("div", class_="m_col-wid")
-                cwid1 = mid.find("div", class_="m_col-wid1")
-                cwid2 = mid.find("div", class_="m_col-wid2")
-                if cwid and cwid1 and cwid2:
-                    t1 = cwid.get_text(strip=True).replace(",", "")
-                    t2 = cwid1.get_text(strip=True).replace(",", "")
-                    t3 = cwid2.get_text(strip=True).replace(",", "")
-                    if t1.isdigit() and indices["stats"]["trade"] == 0:
-                        indices["stats"]["trade"] = int(t1)
-                        indices["stats"]["volume"] = int(t2) if t2.isdigit() else 0
-                        indices["stats"]["value_mn"] = float(t3) if t3.replace(".", "", 1).isdigit() else 0.0
-                    elif t1.isdigit() and indices["stats"]["advanced"] == 0:
-                        indices["stats"]["advanced"] = int(t1)
-                        indices["stats"]["declined"] = int(t2) if t2.isdigit() else 0
-                        indices["stats"]["unchanged"] = int(t3) if t3.isdigit() else 0
+        url_idx = "https://stocknow.com.bd/api/v1/indices"
+        r_sn = requests.get(url_idx, headers=HTTP_HEADERS, verify=False, timeout=5)
+        if r_sn.status_code == 200:
+            data_sn = r_sn.json()
+            items = data_sn if isinstance(data_sn, list) else (data_sn.values() if isinstance(data_sn, dict) else [])
+            for item in items:
+                if isinstance(item, dict):
+                    code = str(item.get("code") or item.get("symbol") or item.get("name") or "").upper()
+                    val = float(item.get("ltp") or item.get("close") or item.get("value") or 0.0)
+                    chg = float(item.get("change") or 0.0)
+                    pct = float(item.get("change_percent") or item.get("pct_change") or (round(chg / (val - chg) * 100, 2) if (val - chg) > 0 else 0.0))
+                    if "DSEX" in code and val > 0:
+                        indices["DSEX"].update({"value": val, "change": chg, "pct_change": pct})
+                    elif "DSES" in code and val > 0:
+                        indices["DSES"].update({"value": val, "change": chg, "pct_change": pct})
+                    elif ("DS30" in code or "DSE30" in code) and val > 0:
+                        indices["DS30"].update({"value": val, "change": chg, "pct_change": pct})
     except Exception:
         pass
+
+    # 2. Secondary Source: DSE Official Homepage Scraper
+    if indices["DSEX"]["value"] == 0.0 or indices["DSES"]["value"] == 0.0 or indices["DS30"]["value"] == 0.0:
+        try:
+            r = requests.get("https://www.dsebd.org/index.php", headers=HTTP_HEADERS, verify=False, timeout=6)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.content, "html.parser")
+                for mid in soup.find_all("div", class_="midrow"):
+                    c1 = mid.find("div", class_="m_col-1")
+                    c2 = mid.find("div", class_="m_col-2")
+                    c3 = mid.find("div", class_="m_col-3")
+                    c4 = mid.find("div", class_="m_col-4")
+                    if c1 and c2 and c3 and c4:
+                        name_txt = c1.get_text(strip=True).upper()
+                        try:
+                            val = float(c2.get_text(strip=True).replace(",", ""))
+                            chg = float(c3.get_text(strip=True).replace(",", ""))
+                            pct = float(c4.get_text(strip=True).replace("%", "").replace(",", "").strip())
+                            if ("DSEX" in name_txt or "DSE X" in name_txt) and indices["DSEX"]["value"] == 0.0:
+                                indices["DSEX"].update({"value": val, "change": chg, "pct_change": pct})
+                            elif ("DSES" in name_txt or "DSE S" in name_txt) and indices["DSES"]["value"] == 0.0:
+                                indices["DSES"].update({"value": val, "change": chg, "pct_change": pct})
+                            elif ("DS30" in name_txt or "DSE 30" in name_txt or "DSE30" in name_txt) and indices["DS30"]["value"] == 0.0:
+                                indices["DS30"].update({"value": val, "change": chg, "pct_change": pct})
+                        except Exception:
+                            pass
+                    
+                    # Check stats
+                    cwid = mid.find("div", class_="m_col-wid")
+                    cwid1 = mid.find("div", class_="m_col-wid1")
+                    cwid2 = mid.find("div", class_="m_col-wid2")
+                    if cwid and cwid1 and cwid2:
+                        t1 = cwid.get_text(strip=True).replace(",", "")
+                        t2 = cwid1.get_text(strip=True).replace(",", "")
+                        t3 = cwid2.get_text(strip=True).replace(",", "")
+                        if t1.isdigit() and indices["stats"]["trade"] == 0:
+                            indices["stats"]["trade"] = int(t1)
+                            indices["stats"]["volume"] = int(t2) if t2.isdigit() else 0
+                            indices["stats"]["value_mn"] = float(t3) if t3.replace(".", "", 1).isdigit() else 0.0
+                        elif t1.isdigit() and indices["stats"]["advanced"] == 0:
+                            indices["stats"]["advanced"] = int(t1)
+                            indices["stats"]["declined"] = int(t2) if t2.isdigit() else 0
+                            indices["stats"]["unchanged"] = int(t3) if t3.isdigit() else 0
+        except Exception:
+            pass
+
+    # 3. Tertiary Fallback: Fetch latest genuine closing indices from bdshare
+    if indices["DSEX"]["value"] == 0.0 or indices["DSES"]["value"] == 0.0 or indices["DS30"]["value"] == 0.0:
+        try:
+            m_df = bdshare.get_market_info()
+            if m_df is not None and not m_df.empty:
+                cols = {str(c).strip().lower(): c for c in m_df.columns}
+                dsex_col = next((cols[k] for k in cols if 'dsex' in k), None)
+                dses_col = next((cols[k] for k in cols if 'dses' in k), None)
+                ds30_col = next((cols[k] for k in cols if 'ds30' in k or 'dse30' in k), None)
+                trade_col = next((cols[k] for k in cols if 'trade' in k), None)
+                vol_col = next((cols[k] for k in cols if 'volume' in k), None)
+                val_col = next((cols[k] for k in cols if 'value' in k), None)
+
+                if dsex_col and len(m_df) >= 1:
+                    last_row = m_df.iloc[-1]
+                    prev_row = m_df.iloc[-2] if len(m_df) >= 2 else last_row
+
+                    if indices["DSEX"]["value"] == 0.0:
+                        v = float(str(last_row[dsex_col]).replace(',', ''))
+                        pv = float(str(prev_row[dsex_col]).replace(',', '')) if prev_row is not None else v
+                        c = round(v - pv, 2)
+                        p = round((c / pv * 100), 2) if pv > 0 else 0.0
+                        indices["DSEX"].update({"value": v, "change": c, "pct_change": p})
+
+                    if dses_col and indices["DSES"]["value"] == 0.0:
+                        v = float(str(last_row[dses_col]).replace(',', ''))
+                        pv = float(str(prev_row[dses_col]).replace(',', '')) if prev_row is not None else v
+                        c = round(v - pv, 2)
+                        p = round((c / pv * 100), 2) if pv > 0 else 0.0
+                        indices["DSES"].update({"value": v, "change": c, "pct_change": p})
+
+                    if ds30_col and indices["DS30"]["value"] == 0.0:
+                        v = float(str(last_row[ds30_col]).replace(',', ''))
+                        pv = float(str(prev_row[ds30_col]).replace(',', '')) if prev_row is not None else v
+                        c = round(v - pv, 2)
+                        p = round((c / pv * 100), 2) if pv > 0 else 0.0
+                        indices["DS30"].update({"value": v, "change": c, "pct_change": p})
+
+                    if indices["stats"]["trade"] == 0 and trade_col:
+                        try:
+                            indices["stats"]["trade"] = int(str(last_row[trade_col]).replace(',', ''))
+                            indices["stats"]["volume"] = int(str(last_row[vol_col]).replace(',', '')) if vol_col else 0
+                            indices["stats"]["value_mn"] = float(str(last_row[val_col]).replace(',', '')) if val_col else 0.0
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    # 4. Live Breadth & Stats aggregation from live stock quotes
+    if unified_quotes:
+        adv = sum(1 for q in unified_quotes.values() if float(q.get("change", 0.0)) > 0)
+        dec = sum(1 for q in unified_quotes.values() if float(q.get("change", 0.0)) < 0)
+        unc = sum(1 for q in unified_quotes.values() if float(q.get("change", 0.0)) == 0 and float(q.get("ltp", 0.0)) > 0)
+        tot_val = sum(float(q.get("value_mn", 0.0)) for q in unified_quotes.values())
+        tot_vol = sum(float(q.get("volume", 0.0)) for q in unified_quotes.values())
+        tot_tr = sum(int(q.get("trades", 0)) for q in unified_quotes.values())
+
+        if (adv + dec + unc) > 0 and (indices["stats"]["advanced"] == 0 and indices["stats"]["declined"] == 0):
+            indices["stats"]["advanced"] = adv
+            indices["stats"]["declined"] = dec
+            indices["stats"]["unchanged"] = unc
+
+        if tot_val > 0 and indices["stats"]["value_mn"] == 0.0:
+            indices["stats"]["value_mn"] = round(tot_val, 2)
+            indices["stats"]["volume"] = int(tot_vol)
+            indices["stats"]["trade"] = int(tot_tr)
+
     return indices
 
 # ----------------- AUTHENTIC DSEX SUPPORT & REVERSAL ANALYZER ----------------- #
@@ -499,7 +601,7 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     moving averages, Bollinger lower band, RSI, and pivot levels to determine 
     how low DSEX can drop before turning around / reversing upwards.
     """
-    end_d = dt.date.today()
+    end_d = get_bangladesh_today()
     start_d = end_d - dt.timedelta(days=365)
     df = None
     try:
@@ -673,11 +775,11 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         max_safe_floor = round(dsex_now * 0.95, 2)
     else:
         primary_bounce = float(supports_below[0]["val"])
-        major_reversal_min = round(float(min(fib_618, ma50 if ma50 < dsex_now else fib_618)), 2)
-        major_reversal_max = round(float(max(fib_618, ma50 if ma50 < dsex_now else fib_618)), 2)
+        major_reversal_min = round(min(fib_618, ma50 if ma50 < dsex_now else fib_618), 2)
+        major_reversal_max = round(max(fib_618, ma50 if ma50 < dsex_now else fib_618), 2)
         if major_reversal_min == major_reversal_max:
             major_reversal_min = round(major_reversal_min - 40.0, 2)
-        max_safe_floor = float(min(fib_786, swing_low, bb_lower))
+        max_safe_floor = min(fib_786, swing_low, bb_lower)
 
     pts_to_primary = round(dsex_now - primary_bounce, 2)
     pct_to_primary = round((pts_to_primary / dsex_now) * 100, 2)
@@ -779,7 +881,7 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         else:
             res_2_min = res_1
             res_2_max = round(res_1 * 1.015, 2)
-        res_max_peak = float(swing_high if swing_high > dsex_now else bb_upper)
+        res_max_peak = swing_high if swing_high > dsex_now else bb_upper
 
     pts_to_res1 = round(res_1 - dsex_now, 2)
     pct_to_res1 = round((pts_to_res1 / dsex_now) * 100, 2)
@@ -1067,197 +1169,6 @@ def fetch_authentic_dse_news():
 
     return all_news
 
-def parse_date_obj(d_str: str):
-    """Parses date string from DSE circular into a datetime.date object."""
-    if not d_str or any(k in d_str.lower() for k in ['postponed', 'later', 'notice', 'tbd', 'permission', 'tba']):
-        return None
-    cleaned = re.sub(r'^[^\d]+', '', d_str).strip()
-    m1 = re.search(r'(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{2,4})', cleaned, re.IGNORECASE)
-    if m1:
-        day, mon, yr = int(m1.group(1)), m1.group(2).capitalize(), int(m1.group(3))
-        if yr < 100:
-            yr += 2000
-        try:
-            return dt.datetime.strptime(f'{day}-{mon}-{yr}', '%d-%b-%Y').date()
-        except Exception:
-            pass
-    m2 = re.search(r'(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})', cleaned)
-    if m2:
-        day, mon, yr = int(m2.group(1)), m2.group(2)[:3].capitalize(), int(m2.group(3))
-        try:
-            return dt.datetime.strptime(f'{day}-{mon}-{yr}', '%d-%b-%Y').date()
-        except Exception:
-            pass
-    return None
-
-def clean_agm_company_name(text: str) -> str:
-    s = " ".join(text.split()).strip()
-    s = re.sub(r'^(?:.*?(?:notified later\.?|Time|Venue|Date|Information|\bA\.?M\.?\b|\bP\.?M\.?\b|Platform|Hybrid|Court|Order|Lounge\)\.|\d+\.\d+\s*(?:\bAM\b|\bPM\b))\s+)', '', s, flags=re.IGNORECASE).strip()
-    s = re.sub(r'^[0-9\.\s\-\)\(\/\,\;]+', '', s).strip()
-    return s
-
-@st.cache_data(ttl=300)
-def fetch_upcoming_dse_events():
-    """
-    Parses corporate events from the official DSE circular (Company_AGM_EGM.pdf)
-    AND real-time DSE corporate disclosures.
-    STRICT RULE: The Record Date is the primary cut-off priority.
-    If a company's Record Date has already passed before today, it is discarded.
-    Only events with upcoming record dates (>= today) or pending/to-be-announced dates are returned.
-    """
-    today = dt.date.today()
-    events = []
-    seen = set()
-    
-    # 1. Parse official PDF circular
-    try:
-        r = requests.get("https://www.dsebd.org/Company_AGM_EGM.pdf", headers=HTTP_HEADERS, verify=False, timeout=10)
-        if r.status_code == 200:
-            reader = pypdf.PdfReader(io.BytesIO(r.content))
-            
-            for page in reader.pages:
-                raw_lines = [l.strip() for l in page.extract_text().split('\n') if l.strip()]
-                clean_lines = [l for l in raw_lines if not any(h in l for h in ['Last Updated', 'Dhaka Stock Exchange PLC.', "Company's AGM/EGM", 'Name of the Company', 'Purpose Date of AGM', 'Date Venue/Mode Time'])]
-                
-                i = 0
-                while i < len(clean_lines):
-                    line = clean_lines[i]
-                    ye_match = re.search(r'(June\s+\d+,\s*\d{4}|December\s+\d+,\s*\d{4}|March\s+\d+,\s*\d{4}|September\s+\d+,\s*\d{4}|For the purpose of|For amendment of)', line, flags=re.IGNORECASE)
-                    
-                    if ye_match:
-                        trigger_start = ye_match.start()
-                        co_part = line[:trigger_start].strip()
-                        
-                        if i > 0 and len(co_part) < 25:
-                            pl = clean_lines[i-1]
-                            if not pl.endswith('.') and len(pl) < 45 and not any(t in pl.lower() for t in ['venue:', 'mode:', 'platform', 'samarai', 'complex', 'tower', 'auditorium', 'notified later', 'permission']):
-                                full_co = (pl + ' ' + co_part).strip()
-                            else:
-                                full_co = co_part
-                        else:
-                            full_co = co_part
-                        
-                        full_co = clean_agm_company_name(full_co)
-                        
-                        body_lines = [line[trigger_start:]]
-                        j = i + 1
-                        while j < len(clean_lines):
-                            next_l = clean_lines[j]
-                            if re.search(r'(?:June\s+\d+|December\s+\d+|March\s+\d+|September\s+\d+)\s*,\s*\d{4}|For the purpose of|For amendment of', next_l, flags=re.IGNORECASE):
-                                break
-                            body_lines.append(next_l)
-                            j += 1
-                        
-                        body_text = ' '.join(body_lines).strip()
-                        
-                        if full_co and len(full_co) >= 3 and not full_co.lower().startswith('http'):
-                            ye_val = ye_match.group(1).strip()
-                            
-                            div_match = re.search(r'(\d+(?:\.\d+)?%\s*(?:Cash|Stock|Bonus)(?:\s*(?:and\s*\d+%\s*Stock|\s*Dividend))?|No [Dd]ividend|Nil)', body_text)
-                            dividend = div_match.group(1).strip() if div_match else ('EGM / ' + ye_val if 'purpose' in ye_val.lower() or 'amendment' in ye_val.lower() else 'Corporate Purpose')
-                            
-                            dates = re.findall(r'(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4}|\d{1,2}\s+[A-Za-z]+,?\s+\d{4})', body_text)
-                            is_postponed = any(k in body_text.lower() for k in ['postponed', 'notified later', 'court', 'consent', 'permission'])
-                            
-                            agm_date = dates[0] if (len(dates) >= 1 and not is_postponed) else ('Postponed / Court Consent Awaited' if is_postponed else (dates[0] if dates else 'To be notified later'))
-                            rec_date = dates[1] if len(dates) >= 2 else (dates[0] if (len(dates) == 1 and 'record' in body_text.lower()) else 'Announced in Notice')
-                            
-                            rec_dt = parse_date_obj(rec_date)
-                            agm_dt = parse_date_obj(agm_date)
-                            
-                            # If Record Date is already in the past, discard
-                            if rec_dt is not None and rec_dt < today:
-                                i = j
-                                continue
-                            
-                            if rec_dt is not None and rec_dt >= today:
-                                days_away = (rec_dt - today).days
-                                countdown_str = "TODAY (Record Date)" if days_away == 0 else (f"In {days_away} Days (Record Date)" if days_away > 1 else "Tomorrow (Record Date)")
-                                status_tag = f"Upcoming Record Date ({countdown_str})"
-                                status_icon = "📅"
-                                s_bg, s_fg = "#dbeafe", "#1d4ed8"
-                                sort_key = rec_dt
-                            else:
-                                countdown_str = "Record Date Awaiting Schedule"
-                                status_tag = "Record Date Pending / Court Consent Awaited" if is_postponed else "Record Date To Be Announced"
-                                status_icon = "⏸️" if is_postponed else "ℹ️"
-                                s_bg, s_fg = "#fef9c3" if is_postponed else "#f1f5f9", "#a16207" if is_postponed else "#475569"
-                                sort_key = dt.date(2099, 12, 31)
-                            
-                            k = (full_co.lower(), ye_val.lower())
-                            if k not in seen:
-                                seen.add(k)
-                                events.append({
-                                    'company': full_co,
-                                    'dividend': dividend,
-                                    'year_end': ye_val,
-                                    'agm_date': agm_date,
-                                    'record_date': rec_date,
-                                    'rec_dt': rec_dt,
-                                    'agm_dt': agm_dt,
-                                    'sort_key': sort_key,
-                                    'countdown': countdown_str,
-                                    'status': status_tag,
-                                    'icon': status_icon,
-                                    'bg': s_bg,
-                                    'fg': s_fg,
-                                    'details': body_text,
-                                    'source': 'Official DSE Circular (Company_AGM_EGM.pdf)'
-                                })
-                        i = j
-                    else:
-                        i += 1
-    except Exception:
-        pass
-        
-    # 2. Add real-time DSE announcements with upcoming Record Dates (Multi-Page Dissemination)
-    for p in range(1, 35):
-        try:
-            url = f"https://stocknow.com.bd/api/v1/news?page={p}"
-            res = requests.get(url, headers=HTTP_HEADERS, verify=False, timeout=6)
-            if res.status_code == 200:
-                for item in res.json().get("data", []):
-                    code = str(item.get("prefix", "")).strip().upper()
-                    title = str(item.get("title") or "").strip()
-                    details = str(item.get("details", "")).strip()
-                    text = f"{title} {details}"
-                    
-                    matches = re.findall(r'(?:[Rr]ecord\s+[Dd]ate|[Ss]uspended\s+on\s+record\s+date|[Ee]ntitlement\s+of\s+coupon)[^\.\;\n]{0,60}?(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4}|\d{1,2}\s+[A-Za-z]+,?\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{4})', text)
-                    for rm in matches:
-                        rdt = parse_date_obj(rm)
-                        if rdt and rdt >= today:
-                            k = (code.lower(), str(rdt))
-                            if k not in seen:
-                                seen.add(k)
-                                div_m = re.search(r'(\d+(?:\.\d+)?%\s*(?:Cash|Stock|Bonus)(?:\s*(?:and\s*\d+%\s*Stock|\s*Dividend))?|No [Dd]ividend|Nil)', text)
-                                div_str = div_m.group(1).strip() if div_m else ("EGM / Corporate Purpose" if "egm" in text.lower() or "purpose" in text.lower() else "Coupon / Dividend Entitlement")
-                                
-                                days_away = (rdt - today).days
-                                countdown_str = "TODAY" if days_away == 0 else (f"In {days_away} Days" if days_away > 1 else "Tomorrow")
-                                
-                                events.append({
-                                    'company': f"{code} ({title[:35]})" if title else code,
-                                    'dividend': div_str,
-                                    'year_end': "FY 2026",
-                                    'agm_date': "Trading Resumes After Record Date" if "suspended" in text.lower() else "See Corporate Notice",
-                                    'record_date': rm,
-                                    'rec_dt': rdt,
-                                    'agm_dt': None,
-                                    'sort_key': rdt,
-                                    'countdown': countdown_str,
-                                    'status': f"Upcoming Record Date ({countdown_str})",
-                                    'icon': "📅",
-                                    'bg': "#dbeafe",
-                                    'fg': "#1d4ed8",
-                                    'details': details or title,
-                                    'source': "DSE Real-Time Disclosure"
-                                })
-        except Exception:
-            pass
-
-    events.sort(key=lambda x: (x['sort_key'], x['company']))
-    return events
-
 # ----------------- AUTHENTIC HISTORICAL DATA FETCHER ----------------- #
 
 @st.cache_data(ttl=600)
@@ -1267,8 +1178,8 @@ def fetch_authentic_history(symbol: str, days: int = 365) -> pd.DataFrame:
     Filters out non-trading / off-days where open, high, or low is zero.
     """
     symbol = symbol.upper().strip()
-    end_date = str(dt.date.today())
-    start_date = str(dt.date.today() - dt.timedelta(days=days))
+    end_date = str(get_bangladesh_today())
+    start_date = str(get_bangladesh_today() - dt.timedelta(days=days))
 
     try:
         df = bdshare.get_historical_data(start_date, end_date, symbol)
@@ -1979,7 +1890,7 @@ def get_best_15_picks(quotes_data: dict) -> list:
             continue
 
         if ltp > 0:
-            today_dt = pd.Timestamp(dt.date.today())
+            today_dt = pd.Timestamp(get_bangladesh_today())
             if today_dt in df_h.index:
                 df_h.loc[today_dt, 'close'] = ltp
                 df_h.loc[today_dt, 'high'] = max(df_h.loc[today_dt, 'high'], high or ltp)
@@ -2120,7 +2031,7 @@ unified_quotes = live_data["unified"]
 status = live_data["status"]
 
 # Fetch Real-time Indices & Turnaround Prediction Calculation early for top header
-dse_indices = get_dse_market_indices()
+dse_indices = get_dse_market_indices(unified_quotes)
 idx_dsex = dse_indices["DSEX"]
 idx_dses = dse_indices["DSES"]
 idx_ds30 = dse_indices["DS30"]
@@ -2175,7 +2086,7 @@ st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
 # ----------------- MAIN TABS STRUCTURE ----------------- #
 
-tab_market, tab_best15, tab_screener, tab_news, tab_agm = st.tabs(["⚡ Live Market Stream", "🌟 Best 15", "🎯 Screener", "📰 News", "📅 AGM & Record Dates"])
+tab_market, tab_best15, tab_screener, tab_news = st.tabs(["⚡ Live Market Stream", "🌟 Best 15", "🎯 Screener", "📰 News"])
 
 with tab_market:
     # 1. Main Live Index Bar
@@ -2426,7 +2337,7 @@ with tab_market:
             rsi_val_card = 0.0
 
             if not df_temp.empty and q["ltp"] > 0:
-                today_dt = pd.Timestamp(dt.date.today())
+                today_dt = pd.Timestamp(get_bangladesh_today())
                 if today_dt in df_temp.index:
                     df_temp.loc[today_dt, 'close'] = q["ltp"]
                     df_temp.loc[today_dt, 'high'] = max(df_temp.loc[today_dt, 'high'], q["high"])
@@ -2465,7 +2376,7 @@ with tab_market:
 
             # Build pattern badge HTML — show dominant pattern matching the verdict, not just first detected
             if patterns_temp:
-                verdict_is_bull = score_temp.get("score", 0) >= 0
+                verdict_is_bull = int(score_temp.get("score", 0)) >= 0
                 # Find lead pattern matching the final verdict direction
                 lead_p = None
                 for _p in patterns_temp:
@@ -2483,14 +2394,14 @@ with tab_market:
                 pattern_badge_html = '<div style="height: 22px; margin: 4px 0 2px 0;"></div>'
 
             # Standardized Lowest Turnaround Floor, Highest Peak, and Movement Direction across all cards
-            buy_target_val = score_temp.get("target_buying_price", round(ltp_val * 0.98, 2)) if ltp_val > 0 else 0.0
-            sell_target_val = score_temp.get("target_selling_price", score_temp.get("target_price", round(ltp_val * 1.05, 2))) if ltp_val > 0 else 0.0
+            buy_target_val = float(score_temp.get("target_buying_price", round(ltp_val * 0.98, 2))) if ltp_val > 0 else 0.0
+            sell_target_val = float(score_temp.get("target_selling_price", score_temp.get("target_price", round(ltp_val * 1.05, 2)))) if ltp_val > 0 else 0.0
 
             down_pct = round(((ltp_val - buy_target_val) / ltp_val) * 100, 1) if ltp_val > 0 and buy_target_val < ltp_val else 0.0
             up_pct = round(((sell_target_val - ltp_val) / ltp_val) * 100, 1) if ltp_val > 0 and sell_target_val > ltp_val else 0.0
 
-            move_badge_txt = score_temp.get("move_badge", f"📈 বাড়বে → Tk {sell_target_val:.2f} (+{up_pct:.1f}%)" if score_temp.get("score", 0) >= 0 else f"📉 কমবে → Tk {buy_target_val:.2f} (-{down_pct:.1f}%)")
-            move_badge_col = score_temp.get("move_color", "#15803d" if score_temp.get("score", 0) >= 0 else "#b91c1c")
+            move_badge_txt = score_temp.get("move_badge", f"📈 বাড়বে → Tk {sell_target_val:.2f} (+{up_pct:.1f}%)" if int(score_temp.get("score", 0)) >= 0 else f"📉 কমবে → Tk {buy_target_val:.2f} (-{down_pct:.1f}%)")
+            move_badge_col = score_temp.get("move_color", "#15803d" if int(score_temp.get("score", 0)) >= 0 else "#b91c1c")
 
             target_badge_html = f"""<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; margin-top: 5px; font-size: 11px;"><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; border-bottom: 1px dashed #e2e8f0; padding-bottom: 3px;"><span style="font-size: 10px; font-weight: 700; color: #64748b;">🔮 গতিপথ (Next Move):</span><strong style="color: {move_badge_col}; font-size: 11px; font-weight: 800;">{move_badge_txt}</strong></div><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;"><span title="পতন হলে সর্বনিম্ন যেখান থেকে ঘুরে দাঁড়াবে">🟢 <b>Turnaround Floor:</b></span><strong style="color: #15803d; font-size: 11.5px;">Tk {buy_target_val:.2f} <span style="font-size: 10px; font-weight: 600; color: #166534;">(-{down_pct:.1f}%)</span></strong></div><div style="display: flex; justify-content: space-between; align-items: center;"><span title="বৃদ্ধি পেলে সর্বোচ্চ যে পর্যন্ত উঠতে পারে">🎯 <b>Highest Peak:</b></span><strong style="color: #b91c1c; font-size: 11.5px;">Tk {sell_target_val:.2f} <span style="font-size: 10px; font-weight: 600; color: #991b1b;">(+{up_pct:.1f}%)</span></strong></div></div>"""
 
@@ -2520,7 +2431,7 @@ with tab_market:
     if not df_selected.empty:
         live_p = quote_sel["ltp"]
         if live_p > 0:
-            today_dt = pd.Timestamp(dt.date.today())
+            today_dt = pd.Timestamp(get_bangladesh_today())
             if today_dt in df_selected.index:
                 df_selected.loc[today_dt, 'close'] = live_p
                 df_selected.loc[today_dt, 'high'] = max(df_selected.loc[today_dt, 'high'], quote_sel["high"])
@@ -2864,106 +2775,7 @@ with tab_news:
     else:
         st.info("No news disclosures match the selected filter criteria.")
 
-# ----------------- TAB 3: UPCOMING AGM & RECORD DATES ----------------- #
-
-with tab_agm:
-    st.subheader("📅 DSE Upcoming Record Dates & Corporate Actions")
-    st.markdown(f"""
-    <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
-        <span style="font-size: 13px; color: #1e40af; font-weight: 600;">
-            📌 <b>Record Date Priority Feed:</b> Only showing companies where the <b>Record Date is ON or AFTER today ({m_status['date_str']})</b> or pending official notice. Expired record dates are automatically excluded.
-        </span>
-        <span style="font-size: 11px; background: #1d4ed8; color: white; padding: 3px 10px; border-radius: 12px; font-weight: 700;">
-            Live Entitlements
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-    st.caption("Official real-time tracking of upcoming dividend entitlement record dates, EGMs, and scheduled corporate meetings from Dhaka Stock Exchange PLC.")
-
-    upcoming_events = fetch_upcoming_dse_events()
-    
-    if upcoming_events:
-        total_up = len(upcoming_events)
-        rec_imminent_cnt = sum(1 for e in upcoming_events if e.get("rec_dt") is not None)
-        pending_rec_cnt = sum(1 for e in upcoming_events if e.get("rec_dt") is None)
-        cash_div_cnt = sum(1 for e in upcoming_events if "cash" in e["dividend"].lower())
-
-        # Summary Metric Cards
-        u_m1, u_m2, u_m3, u_m4 = st.columns(4)
-        with u_m1:
-            st.metric("Total Active Actions", f"{total_up}")
-        with u_m2:
-            st.metric("📌 Upcoming Record Dates", f"{rec_imminent_cnt}")
-        with u_m3:
-            st.metric("💰 Cash Dividend Payers", f"{cash_div_cnt}")
-        with u_m4:
-            st.metric("⏸️ Awaiting Record Schedule", f"{pending_rec_cnt}")
-
-        st.write("---")
-
-        # Filters & Search
-        up_c1, up_c2, up_c3 = st.columns([1.5, 1.5, 2])
-        with up_c1:
-            up_status_filter = st.selectbox(
-                "Filter by Record Date Status",
-                ["All Active Actions", "📌 Imminent Record Dates Only", "⏸️ Awaiting Record Schedule Only"]
-            )
-        with up_c2:
-            up_div_filter = st.selectbox(
-                "Filter by Dividend Type",
-                ["All Types", "Cash Dividend Payers Only", "EGM / Corporate Purpose", "No Dividend Only"]
-            )
-        with up_c3:
-            up_search = st.text_input("🔍 Search Company / Symbol (e.g. Bengal Biscuits, MIDAS, Desh, Marico)", "")
-
-        filtered_up = upcoming_events
-
-        if up_status_filter == "📌 Imminent Record Dates Only":
-            filtered_up = [e for e in filtered_up if e.get("rec_dt") is not None]
-        elif up_status_filter == "⏸️ Awaiting Record Schedule Only":
-            filtered_up = [e for e in filtered_up if e.get("rec_dt") is None]
-
-        if up_div_filter == "Cash Dividend Payers Only":
-            filtered_up = [e for e in filtered_up if "Cash" in e["dividend"]]
-        elif up_div_filter == "No Dividend Only":
-            filtered_up = [e for e in filtered_up if "No" in e["dividend"] or "Nil" in e["dividend"]]
-        elif up_div_filter == "EGM / Corporate Purpose":
-            filtered_up = [e for e in filtered_up if "EGM" in e["dividend"] or "Purpose" in e["dividend"] or "Coupon" in e["dividend"]]
-
-        if up_search.strip():
-            qup = up_search.strip().lower()
-            filtered_up = [
-                e for e in filtered_up
-                if qup in e["company"].lower() or qup in e["dividend"].lower() or qup in e["details"].lower()
-            ]
-
-        st.write(f"Showing **{len(filtered_up)}** active corporate actions:")
-
-        view_mode = st.radio("View Format:", ["🗂️ Detailed Corporate Action Cards", "📊 Interactive Table"], horizontal=True)
-
-        if view_mode == "📊 Interactive Table":
-            table_data = []
-            for ev in filtered_up:
-                table_data.append({
-                    "📌 Record Date": ev["record_date"],
-                    "Company Name": ev["company"],
-                    "💰 Dividend / Purpose": ev["dividend"],
-                    "AGM Date": ev["agm_date"],
-                    "Status / Countdown": f"{ev['icon']} {ev['status']}",
-                    "Financial Year End": ev["year_end"],
-                    "Official Source": ev["source"],
-                    "Details / Venue": ev["details"]
-                })
-            df_table = pd.DataFrame(table_data)
-            st.dataframe(df_table, width="stretch")
-        else:
-            for ev in filtered_up:
-                up_card_html = f"""<div class="news-row-card" style="border-left: 4px solid {ev['fg']};"><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;"><div><span style="font-size: 15px; font-weight: 800; color: #0f172a; margin-right: 8px;">{ev['company']}</span><span class="news-badge" style="background: {ev['bg']}; color: {ev['fg']}; border: 1px solid {ev['fg']}33;">{ev['icon']} {ev['status']}</span></div><span style="font-size: 11px; color: #64748b;">Year End: <b>{ev['year_end']}</b> • <i>{ev['source']}</i></span></div><div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #1e293b; margin: 8px 0;"><span style="background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 6px; font-weight: 700; border: 1px solid #fca5a5;">📌 Record Date: <strong>{ev['record_date']}</strong></span><span>💰 <b>Dividend / Purpose:</b> <strong style="color: #0369a1;">{ev['dividend']}</strong></span><span>⏰ <b>AGM Date:</b> <strong style="color: #15803d;">{ev['agm_date']}</strong></span></div><div style="font-size: 11px; color: #64748b; line-height: 1.4;">{ev['details']}</div></div>"""
-                st.markdown(up_card_html, unsafe_allow_html=True)
-    else:
-        st.info("No active corporate actions with upcoming record dates detected currently.")
-
-# ----------------- TAB 4: STOCK SCREENER (BUY / SELL / HOLD) ----------------- #
+# ----------------- TAB: STOCK SCREENER (BUY / SELL / HOLD) ----------------- #
 
 with tab_screener:
     st.subheader("🎯 Technical Stock Screener & Market Decision Matrix")
@@ -3049,7 +2861,7 @@ with tab_screener:
             df_h = fetch_authentic_history(sym, days=180)
             if not df_h.empty:
                 if ltp > 0:
-                    today_dt = pd.Timestamp(dt.date.today())
+                    today_dt = pd.Timestamp(get_bangladesh_today())
                     if today_dt in df_h.index:
                         df_h.loc[today_dt, 'close'] = ltp
                         df_h.loc[today_dt, 'high'] = max(df_h.loc[today_dt, 'high'], high or ltp)
