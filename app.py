@@ -259,6 +259,7 @@ def get_dse_market_status():
     market_close = dt.time(14, 0)
     post_close = dt.time(14, 10)
 
+    is_open = False
     if is_trading_day:
         if market_open <= curr_time < market_close:
             status_text = "MARKET OPEN"
@@ -267,6 +268,7 @@ def get_dse_market_status():
             status_color = "#15803d"
             status_border = "#86efac"
             status_desc = "Continuous Trading Session (10:00 AM - 02:00 PM)"
+            is_open = True
         elif market_close <= curr_time <= post_close:
             status_text = "POST-CLOSING"
             status_icon = "🟡"
@@ -274,6 +276,7 @@ def get_dse_market_status():
             status_color = "#a16207"
             status_border = "#fde047"
             status_desc = "Post-Close Adjustment (02:00 PM - 02:10 PM)"
+            is_open = True
         else:
             status_text = "MARKET CLOSED"
             status_icon = "🔴"
@@ -281,6 +284,7 @@ def get_dse_market_status():
             status_color = "#b91c1c"
             status_border = "#fca5a5"
             status_desc = "Trading Hours: 10:00 AM - 02:00 PM BST"
+            is_open = False
     else:
         status_text = "MARKET CLOSED (Weekend)"
         status_icon = "🔴"
@@ -288,6 +292,7 @@ def get_dse_market_status():
         status_color = "#b91c1c"
         status_border = "#fca5a5"
         status_desc = "Weekly Market Holiday (Fri & Sat)"
+        is_open = False
 
     date_str = now.strftime("%A, %d %b %Y")
     time_str = now.strftime("%I:%M:%S %p")
@@ -300,7 +305,8 @@ def get_dse_market_status():
         "status_bg": status_bg,
         "status_color": status_color,
         "status_border": status_border,
-        "status_desc": status_desc
+        "status_desc": status_desc,
+        "is_open": is_open
     }
 
 # ----------------- SIDEBAR: LIVE CLOCK & MARKET STATUS ----------------- #
@@ -327,8 +333,19 @@ st.sidebar.markdown(f"""
 
 # ----------------- AUTO REFRESH SETTINGS ----------------- #
 st.sidebar.header("⚡ Live Market Stream")
-refresh_sec = st.sidebar.slider("Auto-Refresh Interval (Seconds)", min_value=5, max_value=60, value=10, step=5)
-st_autorefresh(interval=refresh_sec * 1000, key="dse_live_price_autorefresh")
+
+is_market_open = m_status.get("is_open", False)
+
+if is_market_open:
+    refresh_sec = st.sidebar.slider("Auto-Refresh Interval (Seconds)", min_value=5, max_value=60, value=10, step=5)
+    st_autorefresh(interval=refresh_sec * 1000, key="dse_live_price_autorefresh_open")
+    refresh_display_text = f"{refresh_sec}s"
+else:
+    # When market is closed (after hours or weekend), auto-refresh once every 1 hour (3600 seconds)
+    refresh_sec = 3600
+    st_autorefresh(interval=refresh_sec * 1000, key="dse_live_price_autorefresh_closed")
+    refresh_display_text = "1 Hour"
+    st.sidebar.info("🌙 **Market is Closed:** Auto-refresh scheduled every **1 Hour**.")
 
 if st.sidebar.button("🔄 Force Refresh All Data"):
     st.cache_data.clear()
@@ -1674,16 +1691,25 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
         else:
             signals.append(("Pattern", "Neutral", f"📐 **{p['name']}**: {p['status']} [0]"))
 
-    # If net pattern bias is bearish (bear_score > bull_score), reassign dominance
-    if bear_pat_score_total > bull_pat_score_total:
-        has_bull_pattern = False
-        has_bear_pattern = True
-    elif bull_pat_score_total > 0:
-        has_bull_pattern = True
-        has_bear_pattern = False
-
     score += pattern_boost
     final_score = int(np.clip(score, -100, 100))
+
+    # Strict alignment of pattern dominance with the final composite score direction
+    if final_score > 0 and bull_pat_score_total > 0:
+        has_bull_pattern = True
+        has_bear_pattern = False
+    elif final_score < 0 and bear_pat_score_total > 0:
+        has_bull_pattern = False
+        has_bear_pattern = True
+    elif bear_pat_score_total > bull_pat_score_total:
+        has_bull_pattern = False
+        has_bear_pattern = True
+    elif bull_pat_score_total > bear_pat_score_total:
+        has_bull_pattern = True
+        has_bear_pattern = False
+    else:
+        has_bull_pattern = False
+        has_bear_pattern = False
 
     if final_score >= 35:
         action, blinker_class, color = "STRONG BUY", "blink-dot-green", "#00C853"
@@ -1770,7 +1796,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
     chan_h = float(chan_20["high"].max())
     chan_l = float(chan_20["low"].min())
 
-    if has_bull_pattern or final_score >= 15:
+    if final_score >= 15 or (final_score > 0 and has_bull_pattern):
         target_display = lead_pat_target if (lead_pat_target > latest_price) else target_sell_p
         target_disp_pct = round(((target_display - latest_price) / (latest_price + 1e-9)) * 100, 1)
         pat_suffix = f" ({lead_pat_name})" if lead_pat_name else ""
@@ -1780,7 +1806,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
         move_bg = "#f0fdf4"
         move_border = "#86efac"
         move_prob = min(94.0, round(65.0 + (max(0, final_score) * 0.28), 1))
-    elif has_bear_pattern or final_score <= -15:
+    elif final_score <= -15 or (final_score < 0 and has_bear_pattern):
         move_dir = f"📉 দাম কমবে — রিভার্সাল ফ্লোর Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
         move_badge = f"📉 কমবে → Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
         move_color = "#b91c1c"
@@ -2045,7 +2071,7 @@ reversal_data = get_dsex_reversal_analysis(
 )
 
 # Move Last Tick status to the sidebar
-st.sidebar.info(f"⏱️ **Last Tick:** {status['fetch_time']} | Auto: **{refresh_sec}s**")
+st.sidebar.info(f"⏱️ **Last Tick:** {status['fetch_time']} | Auto: **{refresh_display_text}**")
 
 # Top Header Layout: Title on Left, Direction Prediction Widget on Right
 top_h_col1, top_h_col2 = st.columns([1.1, 1.0])
