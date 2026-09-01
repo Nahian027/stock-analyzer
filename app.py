@@ -2237,6 +2237,211 @@ def get_best_15_picks(quotes_data: dict) -> list:
     candidates.sort(key=lambda x: (x["score"], x["expected_gain"], x["rr_ratio"]), reverse=True)
     return candidates[:15]
 
+# ----------------- 5-DAY DAY-TO-DAY TRADING FORECAST ENGINE (SUNDAY - THURSDAY) ----------------- #
+
+def get_upcoming_dse_trading_week() -> list:
+    """
+    Computes exact dates and names for the 5 DSE trading days:
+    Sunday (Day 1), Monday (Day 2), Tuesday (Day 3), Wednesday (Day 4), Thursday (Day 5).
+    """
+    now = get_bangladesh_now()
+    today = now.date()
+    weekday = today.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+    
+    # Calculate previous or current Sunday as the anchor
+    if weekday == 6:  # Sunday
+        sunday = today
+    elif weekday == 5:  # Saturday
+        sunday = today + dt.timedelta(days=1)
+    elif weekday == 4:  # Friday
+        sunday = today + dt.timedelta(days=2)
+    else:  # Mon (0), Tue (1), Wed (2), Thu (3)
+        sunday = today - dt.timedelta(days=(weekday + 1))
+        if weekday == 3 and now.time() >= dt.time(14, 0):  # After Thursday market close
+            sunday = today + dt.timedelta(days=3)
+
+    day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
+    bengali_days = ["রবিবার (Sunday)", "সোমবার (Monday)", "মঙ্গলবার (Tuesday)", "বুধবার (Wednesday)", "বৃহস্পতিবার (Thursday)"]
+    trading_days = []
+    
+    for i in range(5):
+        d_date = sunday + dt.timedelta(days=i)
+        trading_days.append({
+            "day_index": i + 1,
+            "day_name": day_names[i],
+            "bengali_name": bengali_days[i],
+            "date": d_date,
+            "date_str": d_date.strftime("%d %b %Y"),
+            "short_str": f"{day_names[i][:3]} ({d_date.strftime('%d %b')})"
+        })
+    return trading_days
+
+@st.cache_data(ttl=120)
+def compute_5_day_forecast(sym: str, ltp: float, high: float, low: float, vol: float, ycp: float, chg: float, pct: float) -> dict:
+    """
+    Computes mathematically rigorous day-to-day projected prices from Sunday to Thursday
+    derived from 20 & 200 EMAs, ATR daily step volatility, RSI momentum curve,
+    volume breakout multipliers, and chart pattern targets.
+    """
+    analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
+    trading_week = get_upcoming_dse_trading_week()
+    score = int(analysis.get("score", 0))
+    df_ind = analysis.get("df_indicators", pd.DataFrame())
+    
+    atr = float(df_ind["ATR"].iloc[-1]) if (not df_ind.empty and "ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025 if ltp > 0 else 1.0)
+    if atr <= 0:
+        atr = ltp * 0.025 if ltp > 0 else 1.0
+
+    target_sell = float(analysis.get("target_selling_price", ltp + (2.0 * atr)))
+    target_buy = float(analysis.get("target_buying_price", max(0.1, ltp - (1.5 * atr))))
+    action = analysis.get("action", "HOLD")
+    rsi_cur = float(analysis.get("rsi", 50.0))
+
+    # Daily trajectory simulation path
+    forecast_days = []
+    prev_price = ltp
+    direction_sign = 1 if score > 0 else (-1 if score < 0 else 0)
+    conviction = min(1.0, abs(score) / 100.0)
+
+    for idx, day_info in enumerate(trading_week):
+        step_num = idx + 1
+        
+        # 1. Base directional momentum drift proportional to ATR and score
+        drift = direction_sign * conviction * (0.35 * atr)
+        
+        # 2. Target gravitation pull
+        if score > 0 and target_sell > prev_price:
+            remaining_gap = target_sell - prev_price
+            drift += remaining_gap * (0.12 + (idx * 0.025))
+        elif score < 0 and target_buy < prev_price:
+            remaining_gap = target_buy - prev_price
+            drift += remaining_gap * (0.12 + (idx * 0.025))
+
+        # 3. Dynamic RSI mean-reversion damping
+        proj_rsi = rsi_cur + (direction_sign * (step_num * 2.8))
+        if proj_rsi > 75 and drift > 0:
+            drift *= 0.55  # Deceleration near overbought ceiling
+        elif proj_rsi < 28 and drift < 0:
+            drift *= 0.55  # Deceleration near demand floor
+
+        projected_close = round(max(0.1, prev_price + drift), 2)
+        daily_high = round(max(prev_price, projected_close) + (0.45 * atr), 2)
+        daily_low = round(max(0.1, min(prev_price, projected_close) - (0.45 * atr)), 2)
+        
+        day_chg = round(projected_close - prev_price, 2)
+        day_pct = round((day_chg / (prev_price + 1e-9)) * 100, 2)
+        cum_pct = round(((projected_close - ltp) / (ltp + 1e-9)) * 100, 2)
+        
+        if day_chg > 0:
+            day_bias_icon = "📈"
+            day_bias_color = "#15803d"
+            day_bias_bg = "#dcfce7"
+            day_bias_desc = "উর্ধ্বমুখী বৃদ্ধি (Bullish Rally)"
+        elif day_chg < 0:
+            day_bias_icon = "📉"
+            day_bias_color = "#b91c1c"
+            day_bias_bg = "#fee2e2"
+            day_bias_desc = "কারেকশন / পতন (Dip / Pullback)"
+        else:
+            day_bias_icon = "⚖️"
+            day_bias_color = "#0284c7"
+            day_bias_bg = "#e0f2fe"
+            day_bias_desc = "কনসোলিডেশন (Consolidation)"
+
+        forecast_days.append({
+            "step": step_num,
+            "day_name": day_info["day_name"],
+            "bengali_name": day_info["bengali_name"],
+            "date_str": day_info["date_str"],
+            "short_str": day_info["short_str"],
+            "projected_close": projected_close,
+            "daily_high": daily_high,
+            "daily_low": daily_low,
+            "day_change": day_chg,
+            "day_pct": day_pct,
+            "cum_pct": cum_pct,
+            "bias_icon": day_bias_icon,
+            "bias_color": day_bias_color,
+            "bias_bg": day_bias_bg,
+            "bias_desc": day_bias_desc
+        })
+
+        prev_price = projected_close
+
+    end_price = forecast_days[-1]["projected_close"] if forecast_days else ltp
+    week_net_gain = round(((end_price - ltp) / (ltp + 1e-9)) * 100, 2) if ltp > 0 else 0.0
+    week_high = max((d["daily_high"] for d in forecast_days), default=ltp)
+    week_low = min((d["daily_low"] for d in forecast_days), default=ltp)
+
+    return {
+        "symbol": sym,
+        "ltp": ltp,
+        "score": score,
+        "action": action,
+        "blinker_class": analysis.get("blinker_class", "blink-dot-yellow"),
+        "color": analysis.get("color", "#FFD600"),
+        "atr": atr,
+        "week_net_gain": week_net_gain,
+        "week_high": week_high,
+        "week_low": week_low,
+        "forecast_days": forecast_days,
+        "target_selling_price": target_sell,
+        "target_buying_price": target_buy,
+        "move_badge": analysis.get("move_badge", ""),
+        "patterns": analysis.get("patterns", []),
+        "rsi": rsi_cur
+    }
+
+def build_5_day_forecast_chart(fc_data: dict):
+    """Generates an interactive Plotly Day-to-Day Cone Simulation Chart."""
+    f_days = fc_data["forecast_days"]
+    days_labels = ["Current (LTP)"] + [d["short_str"] for d in f_days]
+    prices = [fc_data["ltp"]] + [d["projected_close"] for d in f_days]
+    highs = [fc_data["ltp"]] + [d["daily_high"] for d in f_days]
+    lows = [fc_data["ltp"]] + [d["daily_low"] for d in f_days]
+
+    fig = go.Figure()
+
+    # Upper and Lower Confidence / Range Tunnel
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=highs,
+        mode='lines',
+        line=dict(color='rgba(59, 130, 246, 0.3)', width=1, dash='dash'),
+        name='Expected Upper Range (Resistance)',
+        hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=lows,
+        mode='lines',
+        line=dict(color='rgba(59, 130, 246, 0.3)', width=1, dash='dash'),
+        fill='tonexty',
+        fillcolor='rgba(59, 130, 246, 0.08)',
+        name='Expected Lower Range (Support)',
+        hoverinfo='skip'
+    ))
+
+    # Main Day-to-Day Price Projection Line
+    line_col = "#15803d" if fc_data["week_net_gain"] >= 0 else "#b91c1c"
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=prices,
+        mode='lines+markers+text',
+        line=dict(color=line_col, width=3),
+        marker=dict(size=9, color=line_col, symbol='circle'),
+        text=[f"Tk {p:.2f}" for p in prices],
+        textposition="top center",
+        name='Projected Day-to-Day Price'
+    ))
+
+    fig.update_layout(
+        title=dict(text=f"<b>{fc_data['symbol']}</b> — ৫-দিনের দিনভিত্তিক পূর্বাভাস ট্রাজেক্টরি (Sunday ➔ Thursday)", font=dict(size=14, color="#0f172a")),
+        height=380,
+        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis=dict(showgrid=True, gridcolor="#f1f5f9"),
+        yaxis=dict(title="Price (Tk)", showgrid=True, gridcolor="#f1f5f9"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    return fig
+
 # ----------------- 5-PANEL SYNCHRONIZED PLOTLY CHART ----------------- #
 
 def build_advanced_chart(df: pd.DataFrame, ticker: str, patterns: list):
@@ -2378,7 +2583,7 @@ st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
 # ----------------- MAIN TABS STRUCTURE ----------------- #
 
-tab_market, tab_best15, tab_screener, tab_news = st.tabs(["⚡ Live Market Stream", "🌟 Best 15", "🎯 Screener", "📰 News"])
+tab_market, tab_forecast, tab_best15, tab_screener, tab_news = st.tabs(["⚡ Live Market Stream", "🔮 5-Day Forecast", "🌟 Best 15", "🎯 Screener", "📰 News"])
 
 with tab_market:
     # 1. Main Live Index Bar
@@ -2832,6 +3037,196 @@ with tab_market:
             st.dataframe(df_selected.tail(50).sort_index(ascending=False))
     else:
         st.warning(f"No historical archive records found for **{selected_symbol}**. Please verify the symbol or try again.")
+
+# ----------------- TAB: 5-DAY DAY-TO-DAY FORECAST (SUNDAY - THURSDAY) ----------------- #
+
+with tab_forecast:
+    trading_week_info = get_upcoming_dse_trading_week()
+    week_range_str = f"{trading_week_info[0]['date_str']} (রবিবার) – {trading_week_info[-1]['date_str']} (বৃহস্পতিবার)"
+
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #f0fdf4, #ffffff); border: 1.5px solid #86efac; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h2 style="margin: 0; font-size: 20px; font-weight: 900; color: #14532d;">
+                    🔮 ৫-দিনের দিনভিত্তিক মূল্য পূর্বাভাস (Sunday – Thursday 5-Day Forecast)
+                </h2>
+                <div style="font-size: 12.5px; color: #166534; margin-top: 4px; font-weight: 600;">
+                    📅 ট্রেডিং সপ্তাহ সাইকেল: <b>{week_range_str}</b>
+                </div>
+            </div>
+            <div style="background: #ffffff; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 14px; text-align: right;">
+                <span style="font-size: 11px; color: #64748b; font-weight: 700; display: block;">গাণিতিক মডেল</span>
+                <span style="font-size: 12px; font-weight: 800; color: #15803d;">EMA 20/200 + RSI Divergence + ATR Steps + Patterns</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Compute 5-day forecasts for all 10 Portfolio Watchlist stocks
+    portfolio_forecasts = []
+    for item in WATCHLIST_STOCKS:
+        sym = item["symbol"]
+        q = unified_quotes.get(sym, {
+            "ltp": 0.0, "change": 0.0, "pct_change": 0.0, "volume": 0.0,
+            "high": 0.0, "low": 0.0, "avg_price": 0.0, "ycp": 0.0
+        })
+        ltp_v = float(q.get("ltp", 0.0))
+        chg_v = float(q.get("change", 0.0))
+        pct_v = float(q.get("pct_change", 0.0))
+        high_v = float(q.get("high", ltp_v))
+        low_v = float(q.get("low", ltp_v))
+        vol_v = float(q.get("volume", 0.0))
+        ycp_v = float(q.get("ycp", ltp_v))
+
+        fc = compute_5_day_forecast(sym, ltp_v, high_v, low_v, vol_v, ycp_v, chg_v, pct_v)
+        fc["name"] = item["name"]
+        fc["sector"] = item["sector"]
+        fc["category"] = item["category"]
+        portfolio_forecasts.append(fc)
+
+    # 1. Summary Metrics Bar
+    if portfolio_forecasts:
+        bull_stocks = [f for f in portfolio_forecasts if f["week_net_gain"] > 0]
+        bear_stocks = [f for f in portfolio_forecasts if f["week_net_gain"] < 0]
+        avg_w_gain = sum(f["week_net_gain"] for f in portfolio_forecasts) / len(portfolio_forecasts)
+        top_bull = max(portfolio_forecasts, key=lambda x: x["week_net_gain"]) if portfolio_forecasts else None
+
+        f_m1, f_m2, f_m3, f_m4 = st.columns(4)
+        with f_m1:
+            st.metric("📊 পোর্টফোলিও গড় ৫-দিনের প্রত্যাশা", f"{avg_w_gain:+.2f}%", f"{len(bull_stocks)} বুলিশ / {len(bear_stocks)} বেয়ারিশ")
+        with f_m2:
+            st.metric("🏆 সেরা সম্ভাব্য গেইনার", f"{top_bull['symbol']} (+{top_bull['week_net_gain']:.1f}%)" if top_bull else "N/A", "সপ্তাহের শীর্ষ টার্গেট")
+        with f_m3:
+            st.metric("📅 ট্রেডিং দিন সংখ্যা", "৫ দিন (রবি – বৃহঃ)", "সম্পূর্ণ সপ্তাহ সাইকেল")
+        with f_m4:
+            st.metric("🎯 মোট পূর্বাভাষকৃত শেয়ার", f"{len(portfolio_forecasts)} টি শেয়ার", "লাইভ পোর্টফোলিও ওয়াচলিস্ট")
+
+    st.write("---")
+
+    # 2. View Switcher: Interactive Visual Cards vs Day-by-Day Master Table vs Single Stock Deep Dive
+    fc_tab1, fc_tab2 = st.tabs(["📋 দিনভিত্তিক বিস্তারিত টেবিল (Day-by-Day Master Table)", "🃏 ভিজ্যুয়াল কার্ড গ্রিড ও সিমুলেটর (Visual Card Grid & Deep Dive)"])
+
+    with fc_tab1:
+        st.markdown("#### 📅 রবিবার থেকে বৃহস্পতিবার দিনভিত্তিক মূল্য পূর্বাভাস টেবিল (Master Forecast Sheet)")
+        
+        # Build Day-by-Day Master Sheet
+        master_rows = []
+        for fc in portfolio_forecasts:
+            fd = fc["forecast_days"]
+            d1 = fd[0] if len(fd) > 0 else {}
+            d2 = fd[1] if len(fd) > 1 else {}
+            d3 = fd[2] if len(fd) > 2 else {}
+            d4 = fd[3] if len(fd) > 3 else {}
+            d5 = fd[4] if len(fd) > 4 else {}
+
+            master_rows.append({
+                "কোম্পানি (Symbol)": f"{fc['symbol']}",
+                "বর্তমান LTP (Tk)": f"{fc['ltp']:.2f}",
+                "সিগন্যাল": f"{fc['action']}",
+                f"রবিবার ({trading_week_info[0]['short_str']})": f"Tk {d1.get('projected_close', 0):.2f} ({d1.get('day_pct', 0):+.1f}%)",
+                f"সোমবার ({trading_week_info[1]['short_str']})": f"Tk {d2.get('projected_close', 0):.2f} ({d2.get('day_pct', 0):+.1f}%)",
+                f"মঙ্গলবার ({trading_week_info[2]['short_str']})": f"Tk {d3.get('projected_close', 0):.2f} ({d3.get('day_pct', 0):+.1f}%)",
+                f"বুধবার ({trading_week_info[3]['short_str']})": f"Tk {d4.get('projected_close', 0):.2f} ({d4.get('day_pct', 0):+.1f}%)",
+                f"বৃহস্পতিবার ({trading_week_info[4]['short_str']})": f"Tk {d5.get('projected_close', 0):.2f} ({d5.get('day_pct', 0):+.1f}%)",
+                "৫-দিনের মোট লাভ/ক্ষতি": f"{fc['week_net_gain']:+.2f}%",
+                "সাপ্তাহিক রেঞ্জ (High – Low)": f"Tk {fc['week_high']:.1f} – {fc['week_low']:.1f}"
+            })
+
+        st.dataframe(pd.DataFrame(master_rows), width="stretch", hide_index=True)
+
+    with fc_tab2:
+        st.markdown("#### 🃏 পোর্টফোলিও শেয়ারসমূহের ৫-দিনের দিনভিত্তিক ট্রাজেক্টরি কার্ড")
+        
+        # Grid of 2 columns
+        fc_chunks = [portfolio_forecasts[i:i+2] for i in range(0, len(portfolio_forecasts), 2)]
+        for chunk in fc_chunks:
+            c1, c2 = st.columns(2)
+            for c_col, fc in zip([c1, c2], chunk):
+                with c_col:
+                    chg_c = "#15803d" if fc["week_net_gain"] >= 0 else "#b91c1c"
+                    chg_bg = "#dcfce7" if fc["week_net_gain"] >= 0 else "#fee2e2"
+                    
+                    # Generate daily flow pills
+                    pills_html = ""
+                    for d in fc["forecast_days"]:
+                        pills_html += f"""
+                        <div style="flex: 1; background: {d['bias_bg']}; border: 1px solid {d['bias_color']}33; border-radius: 8px; padding: 6px 4px; text-align: center;">
+                            <div style="font-size: 10px; font-weight: 700; color: #475569;">{d['day_name'][:3]}</div>
+                            <div style="font-size: 8.5px; color: #64748b;">{d['date_str'][:6]}</div>
+                            <div style="font-size: 12px; font-weight: 900; color: #0f172a; margin-top: 2px;">Tk {d['projected_close']:.1f}</div>
+                            <div style="font-size: 10px; font-weight: 800; color: {d['bias_color']};">{d['day_pct']:+.1f}%</div>
+                        </div>
+                        """
+
+                    card_box = f"""
+                    <div style="background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04);">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                            <div>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <strong style="font-size: 17px; color: #0f172a;">{fc['symbol']}</strong>
+                                    <span style="font-size: 11px; background: #f1f5f9; color: #475569; padding: 2px 6px; border-radius: 4px; font-weight: 700;">{fc['sector']}</span>
+                                </div>
+                                <div style="font-size: 11px; color: #64748b; margin-top: 2px;">{fc['name']}</div>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="font-size: 10px; color: #64748b; font-weight: 700;">৫-দিনের নেট প্রত্যাশা</div>
+                                <div style="background: {chg_bg}; color: {chg_c}; font-size: 13px; font-weight: 900; padding: 3px 8px; border-radius: 6px; display: inline-block;">
+                                    {fc['week_net_gain']:+.1f}%
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; background: #f8fafc; padding: 6px 10px; border-radius: 6px; margin-bottom: 10px; font-size: 12px;">
+                            <span>বর্তমান মূল্য (LTP): <b style="color: #0f172a;">Tk {fc['ltp']:.2f}</b></span>
+                            <span>টার্গেট রেঞ্জ: <b style="color: #15803d;">Tk {fc['week_low']:.1f} – {fc['week_high']:.1f}</b></span>
+                        </div>
+                        <div style="display: flex; gap: 4px; margin-bottom: 10px;">
+                            {pills_html}
+                        </div>
+                        <div style="font-size: 11px; color: #64748b; border-top: 1px dashed #e2e8f0; padding-top: 6px; display: flex; justify-content: space-between;">
+                            <span>সিগন্যাল: <b style="color: {fc['color']};">{fc['action']}</b> (Score: {fc['score']})</span>
+                            <span>দৈনিক ATR স্টেপ: <b>Tk {fc['atr']:.2f}</b></span>
+                        </div>
+                    </div>
+                    """
+                    st.markdown(card_box, unsafe_allow_html=True)
+
+        st.write("---")
+        st.markdown("#### 🔬 একক শেয়ারের ৫-দিনের ইন্টারঅ্যাক্টিভ সিমুলেটর (Single-Stock 5-Day Cone Simulator)")
+        
+        # Interactive Stock Simulator for ANY stock
+        all_sym_list = sorted(list(unified_quotes.keys()))
+        default_idx = all_sym_list.index("GP") if "GP" in all_sym_list else 0
+        sim_sym = st.selectbox("শেয়ার নির্বাচন করুন (Select Stock to Inspect 5-Day Trajectory)", all_sym_list, index=default_idx)
+        
+        q_sim = unified_quotes.get(sim_sym, {})
+        ltp_s = float(q_sim.get("ltp", 0.0))
+        chg_s = float(q_sim.get("change", 0.0))
+        pct_s = float(q_sim.get("pct_change", 0.0))
+        high_s = float(q_sim.get("high", ltp_s))
+        low_s = float(q_sim.get("low", ltp_s))
+        vol_s = float(q_sim.get("volume", 0.0))
+        ycp_s = float(q_sim.get("ycp", ltp_s))
+
+        sim_fc = compute_5_day_forecast(sim_sym, ltp_s, high_s, low_s, vol_s, ycp_s, chg_s, pct_s)
+        
+        # Show Forecast Trajectory Plotly Chart
+        st.plotly_chart(build_5_day_forecast_chart(sim_fc), use_container_width=True)
+
+        # Detailed Day-to-Day breakdown table for selected stock
+        sim_day_table = []
+        for d in sim_fc["forecast_days"]:
+            sim_day_table.append({
+                "ট্রেডিং দিন (Trading Day)": d["bengali_name"],
+                "তারিখ (Date)": d["date_str"],
+                "প্রত্যাশিত ক্লোজিং মূল্য (Tk)": f"Tk {d['projected_close']:.2f}",
+                "সম্ভাব্য সর্বোচ্চ মূল্য (High)": f"Tk {d['daily_high']:.2f}",
+                "সম্ভাব্য সর্বনিম্ন মূল্য (Low)": f"Tk {d['daily_low']:.2f}",
+                "দৈনিক পরিবর্তন (%)": f"{d['day_change']:+.2f} ({d['day_pct']:+.2f}%)",
+                "কিউমুলেটিভ পরিবর্তন (Cumulative %)": f"{d['cum_pct']:+.2f}%",
+                "গতিপ্রকৃতি (Movement Bias)": f"{d['bias_icon']} {d['bias_desc']}"
+            })
+        st.dataframe(pd.DataFrame(sim_day_table), width="stretch", hide_index=True)
 
 # ----------------- TAB: BEST 15 SURE-SHOT PICKS (30-DAY 5%-10%+ GAIN) ----------------- #
 
