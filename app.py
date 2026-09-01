@@ -1267,7 +1267,9 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["SMA_50"] = close.rolling(window=50, min_periods=10).mean()
     df["SMA_200"] = close.rolling(window=200, min_periods=20).mean()
     df["EMA_9"] = close.ewm(span=9, adjust=False).mean()
+    df["EMA_20"] = close.ewm(span=20, adjust=False).mean()
     df["EMA_21"] = close.ewm(span=21, adjust=False).mean()
+    df["EMA_200"] = close.ewm(span=200, adjust=False).mean()
 
     # ADX (14) & Directional Movement
     tr1 = high - low
@@ -1349,12 +1351,12 @@ def find_extrema(prices: pd.Series, order: int = 4):
 def detect_chart_patterns(df: pd.DataFrame) -> list:
     """
     Scans the OHLCV series for:
-    - Reversal: Double Top/Bottom, Head & Shoulders, Inverse H&S, Rising/Falling Wedge
-    - Continuation: Cup & Handle, Bullish/Bearish Flags
-    - Triangles: Ascending, Descending, Symmetrical
+    - Reversals: Double Top / Double Bottom, Head & Shoulders, Inverse Head & Shoulders, Rising & Falling Wedges
+    - Continuations: Cup and Handle, Bullish Flag
+    - Consolidations: Ascending Triangle, Descending Triangle, Symmetrical Triangle
     """
     patterns = []
-    if len(df) < 35:
+    if len(df) < 20:
         return patterns
 
     close = df["close"]
@@ -1529,15 +1531,15 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
             })
 
     # 4. CUP AND HANDLE (Bullish Continuation)
-    if len(df) >= 50:
-        cup_window = df.iloc[-50:]
+    if len(df) >= 45:
+        cup_window = df.iloc[-45:]
         left_rim = cup_window["high"].iloc[:15].max()
-        bottom = cup_window["low"].iloc[15:35].min()
-        right_rim = cup_window["high"].iloc[35:45].max()
-        handle_low = cup_window["low"].iloc[45:].min()
+        bottom = cup_window["low"].iloc[15:32].min()
+        right_rim = cup_window["high"].iloc[32:40].max()
+        handle_low = cup_window["low"].iloc[40:].min()
         
         cup_depth = left_rim - bottom
-        if cup_depth > 0.08 * left_rim and abs(left_rim - right_rim) / left_rim <= 0.04:
+        if cup_depth > 0.06 * left_rim and abs(left_rim - right_rim) / left_rim <= 0.05:
             handle_pullback = right_rim - handle_low
             if handle_pullback <= 0.45 * cup_depth:
                 patterns.append({
@@ -1552,14 +1554,159 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                     "description": f"Rounded accumulation bottom (Tk {bottom:.1f}) with breakout rim at Tk {right_rim:.1f}."
                 })
 
+    # 5. BULLISH FLAG (High-Probability Continuation Setup)
+    if len(df) >= 20:
+        pole_slice = df.iloc[-18:-6]
+        flag_slice = df.iloc[-6:]
+        
+        pole_low = pole_slice["low"].min()
+        pole_high = pole_slice["high"].max()
+        pole_height = pole_high - pole_low
+        
+        if pole_height / (pole_low + 1e-9) >= 0.08:
+            flag_high = flag_slice["high"].max()
+            flag_low = flag_slice["low"].min()
+            flag_pullback = pole_high - flag_low
+            
+            if flag_pullback <= 0.50 * pole_height:
+                is_breakout = latest_price >= flag_high
+                patterns.append({
+                    "name": "Bullish Flag",
+                    "type": "Bullish Continuation",
+                    "bias": "Bullish",
+                    "status": "Confirmed Breakout" if is_breakout else "Consolidating in Flag Channel",
+                    "confidence": 85 if is_breakout else 70,
+                    "neckline": round(flag_high, 2),
+                    "target": round(flag_high + (0.75 * pole_height), 2),
+                    "stop_loss": round(flag_low - (0.5 * atr), 2),
+                    "description": f"Prior +{((pole_height/pole_low)*100):.1f}% flagpole rally with tight consolidation channel."
+                })
+
     return patterns
+
+# ----------------- MUST-KNOW CANDLESTICK TRIGGERS DETECTOR ----------------- #
+
+def detect_candlestick_triggers(df: pd.DataFrame) -> list:
+    """
+    Scans the latest 2 trading candles for high-probability candlestick triggers:
+    - Bullish / Bearish Engulfing (High-volume daily takeover)
+    - Hammer / Shooting Star (Pinbars - rejection of price extremes)
+    - Doji (Market indecision at critical trend levels)
+    """
+    triggers = []
+    if len(df) < 3:
+        return triggers
+
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    c_open, c_close, c_high, c_low, c_vol = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"]), float(curr["volume"])
+    p_open, p_close = float(prev["open"]), float(prev["close"])
+    vma20 = float(curr["Vol_SMA_20"]) if ("Vol_SMA_20" in df.columns and pd.notnull(curr["Vol_SMA_20"])) else c_vol
+    atr = float(curr["ATR"]) if ("ATR" in df.columns and pd.notnull(curr["ATR"])) else (c_high - c_low)
+
+    c_body = abs(c_close - c_open)
+    c_range = c_high - c_low + 1e-9
+    c_is_green = c_close > c_open
+    p_is_green = p_close > p_open
+
+    # 1. BULLISH ENGULFING
+    if not p_is_green and c_is_green:
+        if c_open <= p_close and c_close >= p_open and c_body > 0:
+            vol_boost = " with High Institutional Volume (>20 VMA)" if c_vol > vma20 else ""
+            triggers.append({
+                "name": "Bullish Engulfing",
+                "type": "Candlestick Trigger",
+                "bias": "Bullish",
+                "weight": 20 if c_vol > vma20 else 15,
+                "description": f"Strong green candle completely engulfed previous red body{vol_boost}."
+            })
+
+    # 2. BEARISH ENGULFING
+    if p_is_green and not c_is_green:
+        if c_open >= p_close and c_close <= p_open and c_body > 0:
+            triggers.append({
+                "name": "Bearish Engulfing",
+                "type": "Candlestick Trigger",
+                "bias": "Bearish",
+                "weight": 20 if c_vol > vma20 else 15,
+                "description": "Strong red candle completely engulfed previous green body."
+            })
+
+    # 3. HAMMER (Bullish Pinbar)
+    lower_shadow = min(c_open, c_close) - c_low
+    upper_shadow = c_high - max(c_open, c_close)
+    if lower_shadow >= 2.0 * c_body and upper_shadow <= (0.35 * c_body + 0.1 * atr):
+        triggers.append({
+            "name": "Hammer (Bullish Pinbar)",
+            "type": "Candlestick Trigger",
+            "bias": "Bullish",
+            "weight": 18,
+            "description": f"Long lower shadow (Tk {c_low:.1f}) rejecting lower demand zone."
+        })
+
+    # 4. SHOOTING STAR (Bearish Pinbar)
+    if upper_shadow >= 2.0 * c_body and lower_shadow <= (0.35 * c_body + 0.1 * atr):
+        triggers.append({
+            "name": "Shooting Star (Bearish Pinbar)",
+            "type": "Candlestick Trigger",
+            "bias": "Bearish",
+            "weight": 18,
+            "description": f"Long upper wick (Tk {c_high:.1f}) rejecting upper resistance."
+        })
+
+    # 5. DOJI
+    if c_body / c_range <= 0.10 and c_range > (0.005 * c_close):
+        triggers.append({
+            "name": "Doji Candle",
+            "type": "Candlestick Trigger",
+            "bias": "Neutral",
+            "weight": 0,
+            "description": "Market equilibrium & indecision candle at critical level."
+        })
+
+    return triggers
+
+# ----------------- RSI DIVERGENCE DETECTOR ----------------- #
+
+def detect_rsi_divergence(df: pd.DataFrame) -> list:
+    """Detects Regular Bullish and Bearish RSI (14) Divergences."""
+    divergences = []
+    if len(df) < 25 or "RSI" not in df.columns:
+        return divergences
+
+    span = df.tail(20)
+    prices = span["close"].values
+    rsis = span["RSI"].values
+
+    # Bullish Divergence: Lower price low, Higher RSI low
+    if prices[-1] < min(prices[:12]) and rsis[-1] > (min(rsis[:12]) + 2.5) and rsis[-1] < 45:
+        divergences.append({
+            "name": "Bullish RSI Divergence",
+            "type": "Momentum Divergence",
+            "bias": "Bullish",
+            "weight": 20,
+            "description": "Price formed a lower low while RSI formed a higher low (Strong reversal setup)."
+        })
+
+    # Bearish Divergence: Higher price high, Lower RSI high
+    elif prices[-1] > max(prices[:12]) and rsis[-1] < (max(rsis[:12]) - 2.5) and rsis[-1] > 55:
+        divergences.append({
+            "name": "Bearish RSI Divergence",
+            "type": "Momentum Divergence",
+            "bias": "Bearish",
+            "weight": 20,
+            "description": "Price formed a higher high while RSI formed a lower high (Overbought exhaustion)."
+        })
+
+    return divergences
 
 # ----------------- COMPOSITE DECISION & SCORING ENGINE ----------------- #
 
 def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
     """
-    Evaluates multi-indicator categories (Trend, Momentum, Volatility, Volume)
-    AND detected chart patterns to calculate the ultimate Buy/Sell action.
+    Evaluates multi-indicator categories (Trend, Momentum, Volatility, Volume),
+    Candlestick Triggers, and Chart Patterns to calculate the ultimate Buy/Sell action.
     """
     latest = df.iloc[-1]
     score = 0
@@ -1568,8 +1715,15 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
     atr = latest.get("ATR", 2.0) if pd.notnull(latest.get("ATR")) else 2.0
 
     # A. TREND INDICATORS
-    # 1. 200 SMA (Major Trend Filter - balanced penalty)
-    if pd.notnull(latest.get("SMA_200")):
+    # 1. 200 EMA (Macro Trend Filter)
+    if pd.notnull(latest.get("EMA_200")):
+        if latest_price >= latest["EMA_200"]:
+            score += 15
+            signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) > 200-day EMA (Tk {latest['EMA_200']:.1f}) [Macro Bullish] [+15]"))
+        else:
+            score -= 10
+            signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 200-day EMA (Tk {latest['EMA_200']:.1f}) [Macro Bearish] [-10]"))
+    elif pd.notnull(latest.get("SMA_200")):
         if latest_price >= latest["SMA_200"]:
             score += 15
             signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) > 200-day SMA (Tk {latest['SMA_200']:.1f}) [+15]"))
@@ -1577,16 +1731,25 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             score -= 10
             signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 200-day SMA (Tk {latest['SMA_200']:.1f}) [-10]"))
 
-    # 2. EMA 9 vs EMA 21 (Short-term Trend)
+    # 2. 20 EMA (Short-term Momentum Filter)
+    if pd.notnull(latest.get("EMA_20")):
+        if latest_price >= latest["EMA_20"]:
+            score += 10
+            signals.append(("Trend", "Bullish", f"Price > 20-day EMA (Tk {latest['EMA_20']:.1f}) [Short-term Momentum] [+10]"))
+        else:
+            score -= 5
+            signals.append(("Trend", "Bearish", f"Price < 20-day EMA (Tk {latest['EMA_20']:.1f}) [-5]"))
+
+    # 3. EMA 9 vs EMA 21 (Short-term Trend Momentum)
     if pd.notnull(latest.get("EMA_9")) and pd.notnull(latest.get("EMA_21")):
         if latest["EMA_9"] >= latest["EMA_21"]:
             score += 10
-            signals.append(("Trend", "Bullish", "EMA 9 > EMA 21 (Short-term upward momentum) [+10]"))
+            signals.append(("Trend", "Bullish", "EMA 9 > EMA 21 (Short-term upward crossover) [+10]"))
         else:
             score -= 5
             signals.append(("Trend", "Bearish", "EMA 9 < EMA 21 (Short-term downward pressure) [-5]"))
 
-    # 3. ADX (Trend Strength)
+    # 4. ADX (Trend Strength)
     if pd.notnull(latest.get("ADX")):
         adx_val = latest["ADX"]
         plus_di = latest.get("Plus_DI", 0)
@@ -1602,7 +1765,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             signals.append(("Trend", "Neutral", f"Weak trend / range-bound consolidation (ADX {adx_val:.1f} < 25) [0]"))
 
     # B. MOMENTUM OSCILLATORS
-    # 4. RSI (14)
+    # 5. RSI (14) & Divergence
     if pd.notnull(latest.get("RSI")):
         rsi = latest["RSI"]
         if 45 <= rsi <= 65:
@@ -1618,7 +1781,17 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             score -= 5
             signals.append(("Momentum", "Neutral", f"RSI ({rsi:.1f}) neutral zone [-5]"))
 
-    # 5. MACD (12, 26, 9)
+    # Check for RSI Regular Divergence
+    rsi_divs = detect_rsi_divergence(df)
+    for div in rsi_divs:
+        if div["bias"] == "Bullish":
+            score += div["weight"]
+            signals.append(("Divergence", "Bullish", f"🔄 **{div['name']}**: {div['description']} [+{div['weight']}]"))
+        else:
+            score -= div["weight"]
+            signals.append(("Divergence", "Bearish", f"🔄 **{div['name']}**: {div['description']} [-{div['weight']}]"))
+
+    # 6. MACD (12, 26, 9)
     if pd.notnull(latest.get("MACD")) and pd.notnull(latest.get("MACD_Signal")):
         if latest["MACD"] >= latest["MACD_Signal"]:
             score += 15
@@ -1627,7 +1800,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             score -= 10
             signals.append(("Momentum", "Bearish", "MACD line below Signal line (Bearish momentum) [-10]"))
 
-    # 6. Stochastic Oscillator (%K, %D)
+    # 7. Stochastic Oscillator (%K, %D)
     if pd.notnull(latest.get("Stoch_K")) and pd.notnull(latest.get("Stoch_D")):
         k, d = latest["Stoch_K"], latest["Stoch_D"]
         if k > d and k < 80:
@@ -1638,7 +1811,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             signals.append(("Momentum", "Bearish", f"Stochastic %K ({k:.1f}) crossed below %D ({d:.1f}) [-10]"))
 
     # C. VOLATILITY & VOLUME
-    # 7. Bollinger Bands
+    # 8. Bollinger Bands
     if pd.notnull(latest.get("SMA_20")):
         if latest_price >= latest["SMA_20"]:
             score += 10
@@ -1647,17 +1820,33 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
             score -= 5
             signals.append(("Volatility", "Neutral", "Price near 20-day Bollinger Mid-Band [-5]"))
 
-    # 8. Volume & Price Action Confirmation
-    if len(df) >= 2 and latest_price > df["close"].iloc[-2]:
-        score += 10
-        signals.append(("PriceAction", "Bullish", f"Positive Session Gain (+{(latest_price - df['close'].iloc[-2]):.2f} Tk) [+10]"))
+    # 9. Volume + 20-Day Volume Moving Average (VMA)
+    if pd.notnull(latest.get("Vol_SMA_20")):
+        vma20_val = latest["Vol_SMA_20"]
+        cur_vol = latest["volume"]
+        if cur_vol >= 1.5 * vma20_val and len(df) >= 2 and latest_price >= df["close"].iloc[-2]:
+            score += 15
+            signals.append(("Volume", "Bullish", f"🔥 High-Volume Breakout Confirmation ({int(cur_vol):,} > 1.5x 20 VMA) [+15]"))
+        elif cur_vol > vma20_val:
+            score += 10
+            signals.append(("Volume", "Bullish", f"Trading Volume ({int(cur_vol):,}) > 20-day VMA ({int(vma20_val):,}) [+10]"))
+        elif cur_vol < 0.5 * vma20_val and len(df) >= 2 and latest_price < df["close"].iloc[-2]:
+            score += 5  # Low volume pullbacks are constructive
+            signals.append(("Volume", "Bullish", "Constructive Low-Volume Pullback (Selling pressure dried up) [+5]"))
 
-    if pd.notnull(latest.get("Vol_SMA_20")) and latest["volume"] > latest["Vol_SMA_20"]:
-        score += 10
-        signals.append(("Volume", "Bullish", f"Trading Volume ({int(latest['volume']):,}) > 20-day Average [+10]"))
+    # D. CANDLESTICK TRIGGERS
+    candle_triggers = detect_candlestick_triggers(df)
+    for c_trig in candle_triggers:
+        if c_trig["bias"] == "Bullish":
+            score += c_trig["weight"]
+            signals.append(("Candle", "Bullish", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [+{c_trig['weight']}]"))
+        elif c_trig["bias"] == "Bearish":
+            score -= c_trig["weight"]
+            signals.append(("Candle", "Bearish", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [-{c_trig['weight']}]"))
+        else:
+            signals.append(("Candle", "Neutral", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [0]"))
 
-    # D. CHART PATTERNS MULTIPLIER
-    # Confirmed breakout/breakdown = full weight; Forming/Testing = half weight
+    # E. CHART PATTERNS MULTIPLIER
     pattern_boost = 0
     has_bull_pattern = False
     has_bear_pattern = False
@@ -1669,7 +1858,6 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
 
     for p in patterns:
         status_str = p.get("status", "")
-        # Confirmed pattern = full 35 pts; Forming/Testing = 18 pts (half weight)
         is_confirmed = ("Confirmed" in status_str or "Breakout" in status_str or "Breakdown" in status_str)
         pat_weight = 35 if is_confirmed else 18
 
@@ -1742,7 +1930,7 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list) -> dict:
         if p.get("neckline", 0) > latest_price:
             sell_candidates.append(round(float(p["neckline"]), 2))
 
-    for ma_key in ["SMA_20", "SMA_50", "SMA_200"]:
+    for ma_key in ["SMA_20", "SMA_50", "SMA_200", "EMA_20", "EMA_200"]:
         if pd.notnull(latest.get(ma_key)):
             ma_val = float(latest[ma_key])
             if ma_val > latest_price:
@@ -1894,6 +2082,91 @@ BEST_15_UNIVERSE = [
     {"symbol": "KDSALTD", "name": "KDS Accessories Limited", "sector": "Engineering", "category": "A"}
 ]
 
+# ----------------- UNIFIED TECHNICAL & CHART PATTERN ENGINE ----------------- #
+
+@st.cache_data(ttl=120)
+def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: float, vol: float, ycp: float, chg: float, pct: float) -> dict:
+    """
+    Unified Technical & Chart Pattern Analysis Engine for ANY instrument.
+    Always uses full 360-day historical depth to ensure all Moving Averages (20, 50, 200 SMA, 9, 21 EMA),
+    Oscillators (RSI, MACD, Stoch, ADX), Volatility bands, and Chart Patterns evaluate identically everywhere.
+    """
+    sym = sym.upper().strip()
+    df_h = fetch_authentic_history(sym, days=360)
+
+    if df_h.empty or len(df_h) < 15:
+        est_atr = (high - low) if (high > low and high > 0) else (ltp * 0.025 if ltp > 0 else 1.0)
+        target_s = round(ltp + (2.0 * est_atr), 2)
+        target_b = round(max(0.1, ltp - (1.5 * est_atr)), 2)
+        score_val = 0
+        if pct >= 2.0: score_val = 25
+        elif pct <= -2.0: score_val = -25
+        action = "BUY" if score_val > 15 else ("SELL" if score_val < -15 else "HOLD")
+        return {
+            "symbol": sym,
+            "df_indicators": df_h,
+            "patterns": [],
+            "score": score_val,
+            "action": action,
+            "blinker_class": "blink-dot-green" if action in ["BUY", "STRONG BUY"] else ("blink-dot-red" if action in ["SELL", "STRONG SELL"] else "blink-dot-yellow"),
+            "color": "#00C853" if action in ["BUY", "STRONG BUY"] else ("#D50000" if action in ["SELL", "STRONG SELL"] else "#FFD600"),
+            "move_dir": f"⚖️ রেঞ্জ: Tk {target_b:.1f}–{target_s:.1f}",
+            "move_badge": f"⚖️ রেঞ্জ: {target_b:.1f}–{target_s:.1f}",
+            "move_color": "#0284c7",
+            "move_bg": "#f0f9ff",
+            "move_border": "#bae6fd",
+            "move_prob": 50.0,
+            "target_selling_price": target_s,
+            "target_buying_price": target_b,
+            "stop_loss": target_b,
+            "rr_ratio": 1.5,
+            "rsi": 50.0,
+            "signals": []
+        }
+
+    # Inject live intraday candle into historical dataset
+    if ltp > 0:
+        today_dt = pd.Timestamp(get_bangladesh_today())
+        if today_dt in df_h.index:
+            df_h.loc[today_dt, 'close'] = ltp
+            df_h.loc[today_dt, 'high'] = max(df_h.loc[today_dt, 'high'], high or ltp)
+            df_h.loc[today_dt, 'low'] = min(df_h.loc[today_dt, 'low'], low or ltp)
+            df_h.loc[today_dt, 'volume'] = vol
+        else:
+            new_r = pd.DataFrame([{
+                'open': ltp, 'high': high or ltp, 'low': low or ltp,
+                'close': ltp, 'volume': vol
+            }], index=[today_dt])
+            df_h = pd.concat([df_h, new_r])
+
+    analyzed = compute_all_indicators(df_h)
+    patterns = detect_chart_patterns(analyzed)
+    signals_data = evaluate_stock_signals(analyzed, patterns)
+
+    rsi_val = float(analyzed["RSI"].iloc[-1]) if ("RSI" in analyzed.columns and pd.notnull(analyzed["RSI"].iloc[-1])) else 50.0
+
+    return {
+        "symbol": sym,
+        "df_indicators": analyzed,
+        "patterns": patterns,
+        "score": signals_data["score"],
+        "action": signals_data["action"],
+        "blinker_class": signals_data["blinker_class"],
+        "color": signals_data["color"],
+        "move_dir": signals_data["move_dir"],
+        "move_badge": signals_data["move_badge"],
+        "move_color": signals_data["move_color"],
+        "move_bg": signals_data["move_bg"],
+        "move_border": signals_data["move_border"],
+        "move_prob": signals_data["move_prob"],
+        "target_selling_price": signals_data["target_selling_price"],
+        "target_buying_price": signals_data["target_buying_price"],
+        "stop_loss": signals_data["stop_loss"],
+        "rr_ratio": signals_data["rr_ratio"],
+        "rsi": rsi_val,
+        "signals": signals_data["signals"]
+    }
+
 @st.cache_data(ttl=120)
 def get_best_15_picks(quotes_data: dict) -> list:
     """
@@ -1908,42 +2181,26 @@ def get_best_15_picks(quotes_data: dict) -> list:
         high = float(q.get("high", ltp))
         low = float(q.get("low", ltp))
         vol = float(q.get("volume", 0.0))
+        ycp = float(q.get("ycp", ltp))
         chg = float(q.get("change", 0.0))
         pct = float(q.get("pct_change", 0.0))
 
-        df_h = fetch_authentic_history(sym, days=180)
-        if df_h.empty or len(df_h) < 15:
-            continue
-
-        if ltp > 0:
-            today_dt = pd.Timestamp(get_bangladesh_today())
-            if today_dt in df_h.index:
-                df_h.loc[today_dt, 'close'] = ltp
-                df_h.loc[today_dt, 'high'] = max(df_h.loc[today_dt, 'high'], high or ltp)
-                df_h.loc[today_dt, 'low'] = min(df_h.loc[today_dt, 'low'], low or ltp)
-            else:
-                new_r = pd.DataFrame([{'open': ltp, 'high': high or ltp, 'low': low or ltp, 'close': ltp, 'volume': vol}], index=[today_dt])
-                df_h = pd.concat([df_h, new_r])
-
-        df_eval = compute_all_indicators(df_h)
-        pats = detect_chart_patterns(df_eval)
-        sig = evaluate_stock_signals(df_eval, pats)
-
-        target_sell = sig["target_selling_price"]
-        target_buy = sig["target_buying_price"]
-        score = sig["score"]
-        rsi_val = float(df_eval["RSI"].iloc[-1]) if "RSI" in df_eval.columns and pd.notnull(df_eval["RSI"].iloc[-1]) else 50.0
+        analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
+        score = analysis["score"]
+        action = analysis["action"]
+        target_sell = analysis["target_selling_price"]
+        target_buy = analysis["target_buying_price"]
+        rsi_val = analysis["rsi"]
 
         if ltp > 0 and target_sell > ltp:
             expected_gain = round(((target_sell - ltp) / ltp) * 100, 1)
             downside_risk = round(((ltp - target_buy) / ltp) * 100, 1) if target_buy < ltp else 1.5
             rr_ratio = round(expected_gain / (downside_risk + 1e-4), 2)
 
-            # Filter for candidates with >= 4.5% projected gain and solid risk-reward
-            if expected_gain >= 4.5:
-                # Determine primary technical reason
+            # Strictly pick confirmed BUY or STRONG BUY candidates with solid upside
+            if "BUY" in action and expected_gain >= 4.5:
                 catalyst_reasons = []
-                for cat, tag, msg in sig["signals"]:
+                for cat, tag, msg in analysis["signals"]:
                     if tag == "Bullish":
                         clean_msg = msg.split("[")[0].strip()
                         catalyst_reasons.append(clean_msg)
@@ -1959,51 +2216,53 @@ def get_best_15_picks(quotes_data: dict) -> list:
                     "change": chg,
                     "pct_change": pct,
                     "score": score,
-                    "action": sig["action"],
-                    "blinker_class": sig["blinker_class"],
-                    "color": sig["color"],
+                    "action": action,
+                    "blinker_class": analysis["blinker_class"],
+                    "color": analysis["color"],
                     "rsi": rsi_val,
                     "target_30d": target_sell,
-                    "expected_gain": expected_gain,
+                    "target_buy": target_buy,
                     "turnaround_floor": target_buy,
                     "downside_risk": downside_risk,
-                    "stop_loss": sig["stop_loss"],
+                    "stop_loss": analysis["stop_loss"],
                     "buy_zone": f"Tk {target_buy:.2f} – {ltp:.2f}",
                     "rr_ratio": rr_ratio,
-                    "move_dir": sig["move_dir"],
-                    "move_badge": sig["move_badge"],
-                    "move_prob": sig["move_prob"],
-                    "patterns": pats,
-                    "catalyst": lead_catalyst
+                    "catalyst": lead_catalyst,
+                    "move_dir": analysis["move_dir"],
+                    "move_badge": analysis["move_badge"],
+                    "move_prob": analysis["move_prob"],
+                    "patterns": analysis["patterns"]
                 })
 
-    # Sort strictly by composite score, Risk/Reward ratio, and Expected Gain
-    ranked_picks = sorted(candidates, key=lambda x: (x["score"], x["rr_ratio"], x["expected_gain"]), reverse=True)[:15]
-    return ranked_picks
+    candidates.sort(key=lambda x: (x["score"], x["expected_gain"], x["rr_ratio"]), reverse=True)
+    return candidates[:15]
 
-# ----------------- 4-PANEL SYNCHRONIZED PLOTLY CHART ----------------- #
+# ----------------- 5-PANEL SYNCHRONIZED PLOTLY CHART ----------------- #
 
 def build_advanced_chart(df: pd.DataFrame, ticker: str, patterns: list):
     # Ensure all candles strictly have valid non-zero trading values
     df = df[(df['open'] > 0) & (df['high'] > 0) & (df['low'] > 0) & (df['close'] > 0)]
 
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=5, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.025,
-        row_heights=[0.55, 0.15, 0.15, 0.15]
+        vertical_spacing=0.02,
+        row_heights=[0.46, 0.14, 0.14, 0.13, 0.13]
     )
 
-    # Panel 1: Candlestick + SMAs + EMAs + BB
+    # Panel 1: Candlestick + 20 & 200 EMA + SMAs + BB
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['open'], high=df['high'],
         low=df['low'], close=df['close'], name='Price'
     ), row=1, col=1)
 
+    if 'EMA_20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], line=dict(color='#f59e0b', width=1.3, dash='dot'), name='20 EMA'), row=1, col=1)
+    if 'EMA_200' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(color='#ec4899', width=1.6), name='200 EMA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], line=dict(color='orange', width=1.2), name='20 SMA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], line=dict(color='#0284c7', width=1.2), name='50 SMA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_200'], line=dict(color='#9333ea', width=1.5), name='200 SMA'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_9'], line=dict(color='#10b981', width=1.0, dash='dot'), name='9 EMA'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(150,150,150,0.3)', dash='dash'), name='Upper BB'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(150,150,150,0.3)', dash='dash'), fill='tonexty', fillcolor='rgba(150,150,150,0.05)', name='Lower BB'), row=1, col=1)
 
@@ -2019,34 +2278,41 @@ def build_advanced_chart(df: pd.DataFrame, ticker: str, patterns: list):
                 row=1, col=1
             )
 
-    # Panel 2: RSI (14) & Stochastic %K
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ab63fa', width=1.5), name='RSI (14)'), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], line=dict(color='#38bdf8', width=1.0, dash='dot'), name='Stoch %K'), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="red", line_width=1, row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="green", line_width=1, row=2, col=1)
+    # Panel 2: Volume + 20-Day Volume Moving Average (VMA)
+    vol_colors = np.where(df['close'] >= df['open'], '#10b981', '#ef4444')
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=vol_colors, name='Volume'), row=2, col=1)
+    if 'Vol_SMA_20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['Vol_SMA_20'], line=dict(color='#3b82f6', width=1.5), name='20-Day VMA'), row=2, col=1)
 
-    # Panel 3: MACD
+    # Panel 3: RSI (14) & Stochastic %K
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ab63fa', width=1.5), name='RSI (14)'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Stoch_K'], line=dict(color='#38bdf8', width=1.0, dash='dot'), name='Stoch %K'), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="red", line_width=1, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="green", line_width=1, row=3, col=1)
+
+    # Panel 4: MACD
     hist_colors = np.where(df['MACD_Hist'] >= 0, '#00C853', '#D50000')
-    fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=hist_colors, name='MACD Hist'), row=3, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='#2563eb', width=1.2), name='MACD Line'), row=3, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], line=dict(color='#ea580c', width=1.2), name='Signal Line'), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=hist_colors, name='MACD Hist'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='#2563eb', width=1.2), name='MACD Line'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], line=dict(color='#ea580c', width=1.2), name='Signal Line'), row=4, col=1)
 
-    # Panel 4: ADX & Directional Movement (+DI, -DI)
-    fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='#f59e0b', width=1.5), name='ADX (14)'), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Plus_DI'], line=dict(color='#10b981', width=1.0), name='+DI'), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Minus_DI'], line=dict(color='#ef4444', width=1.0), name='-DI'), row=4, col=1)
-    fig.add_hline(y=25, line_dash="dot", line_color="#888", line_width=1, row=4, col=1)
+    # Panel 5: ADX & Directional Movement (+DI, -DI)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='#f59e0b', width=1.5), name='ADX (14)'), row=5, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Plus_DI'], line=dict(color='#10b981', width=1.0), name='+DI'), row=5, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Minus_DI'], line=dict(color='#ef4444', width=1.0), name='-DI'), row=5, col=1)
+    fig.add_hline(y=25, line_dash="dot", line_color="#888", line_width=1, row=5, col=1)
 
     fig.update_layout(
-        height=820,
+        height=920,
         xaxis_rangeslider_visible=False,
         margin=dict(l=20, r=20, t=25, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     fig.update_yaxes(title_text="Price (Tk)", row=1, col=1)
-    fig.update_yaxes(title_text="RSI / Stoch", range=[0, 100], row=2, col=1)
-    fig.update_yaxes(title_text="MACD", row=3, col=1)
-    fig.update_yaxes(title_text="ADX / DMI", row=4, col=1)
+    fig.update_yaxes(title_text="Volume / VMA", row=2, col=1)
+    fig.update_yaxes(title_text="RSI / Stoch", range=[0, 100], row=3, col=1)
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
+    fig.update_yaxes(title_text="ADX / DMI", row=5, col=1)
 
     return fig
 
@@ -2353,40 +2619,24 @@ with tab_market:
             sym = item["symbol"]
             q = unified_quotes.get(sym, {
                 "ltp": 0.0, "change": 0.0, "pct_change": 0.0, "volume": 0.0,
-                "high": 0.0, "low": 0.0, "avg_price": 0.0, "value_mn": 0.0
+                "high": 0.0, "low": 0.0, "avg_price": 0.0, "value_mn": 0.0, "ycp": 0.0
             })
 
-            # Fetch authentic history to calculate indicators and detect patterns
-            df_temp = fetch_authentic_history(sym, days=360)
-            score_temp = {"score": 0, "action": "HOLD", "blinker_class": "blink-dot-yellow", "color": "#FFD600"}
-            patterns_temp = []
-            rsi_val_card = 0.0
-
-            if not df_temp.empty and q["ltp"] > 0:
-                today_dt = pd.Timestamp(get_bangladesh_today())
-                if today_dt in df_temp.index:
-                    df_temp.loc[today_dt, 'close'] = q["ltp"]
-                    df_temp.loc[today_dt, 'high'] = max(df_temp.loc[today_dt, 'high'], q["high"])
-                    df_temp.loc[today_dt, 'low'] = min(df_temp.loc[today_dt, 'low'], q["low"])
-                else:
-                    new_row = pd.DataFrame([{
-                        'open': q["ltp"], 'high': q["high"] or q["ltp"],
-                        'low': q["low"] or q["ltp"], 'close': q["ltp"],
-                        'volume': q["volume"]
-                    }], index=[today_dt])
-                    df_temp = pd.concat([df_temp, new_row])
-                    
-                analyzed_temp = compute_all_indicators(df_temp)
-                patterns_temp = detect_chart_patterns(analyzed_temp)
-                score_temp = evaluate_stock_signals(analyzed_temp, patterns_temp)
-                if "RSI" in analyzed_temp.columns and not pd.isna(analyzed_temp["RSI"].iloc[-1]):
-                    rsi_val_card = float(analyzed_temp["RSI"].iloc[-1])
-
-            ltp_val = q["ltp"]
-            chg_val = q["change"]
-            pct_val = q["pct_change"]
-            avg_val = q["avg_price"]
+            ltp_val = float(q.get("ltp", 0.0))
+            chg_val = float(q.get("change", 0.0))
+            pct_val = float(q.get("pct_change", 0.0))
+            high_val = float(q.get("high", ltp_val))
+            low_val = float(q.get("low", ltp_val))
+            vol_val = float(q.get("volume", 0.0))
+            ycp_val = float(q.get("ycp", ltp_val))
+            avg_val = float(q.get("avg_price", ltp_val))
             chg_color = "#00C853" if chg_val > 0 else ("#D50000" if chg_val < 0 else "#64748b")
+
+            # Single unified technical analysis engine
+            analysis = get_comprehensive_stock_analysis(sym, ltp_val, high_val, low_val, vol_val, ycp_val, chg_val, pct_val)
+            score_temp = analysis
+            patterns_temp = analysis["patterns"]
+            rsi_val_card = analysis["rsi"]
 
             # Format RSI Badge for top right corner
             if rsi_val_card > 0:
@@ -2400,10 +2650,9 @@ with tab_market:
             else:
                 rsi_badge_html = '<div style="background: #f8fafc; color: #94a3b8; border: 1px solid #e2e8f0; border-radius: 5px; padding: 2px 6px; font-size: 10px; font-weight: 700; white-space: nowrap; flex-shrink: 0; margin-top: 2px;">RSI: N/A</div>'
 
-            # Build pattern badge HTML — show dominant pattern matching the verdict, not just first detected
+            # Build pattern badge HTML — show dominant pattern matching the verdict
             if patterns_temp:
                 verdict_is_bull = int(score_temp.get("score", 0)) >= 0
-                # Find lead pattern matching the final verdict direction
                 lead_p = None
                 for _p in patterns_temp:
                     if verdict_is_bull and _p["bias"] == "Bullish":
@@ -2413,13 +2662,12 @@ with tab_market:
                         lead_p = _p
                         break
                 if lead_p is None:
-                    lead_p = patterns_temp[0]  # fallback
+                    lead_p = patterns_temp[0]
                 badge_cls = "pattern-badge-bull" if lead_p["bias"] == "Bullish" else ("pattern-badge-bear" if lead_p["bias"] == "Bearish" else "pattern-badge-neutral")
                 pattern_badge_html = f'<div style="height: 22px; margin: 4px 0 2px 0;"><span class="pattern-badge {badge_cls}">📐 {lead_p["name"]}</span></div>'
             else:
                 pattern_badge_html = '<div style="height: 22px; margin: 4px 0 2px 0;"></div>'
 
-            # Standardized Lowest Turnaround Floor, Highest Peak, and Movement Direction across all cards
             buy_target_val = float(score_temp.get("target_buying_price", round(ltp_val * 0.98, 2))) if ltp_val > 0 else 0.0
             sell_target_val = float(score_temp.get("target_selling_price", score_temp.get("target_price", round(ltp_val * 1.05, 2)))) if ltp_val > 0 else 0.0
 
