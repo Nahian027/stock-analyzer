@@ -136,6 +136,27 @@ h1, .stHeadingContainer {
 .pattern-badge-bear { background-color: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
 .pattern-badge-neutral { background-color: #fef9c3; color: #a16207; border: 1px solid #fef08a; }
 
+.pattern-detail-card {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.pattern-metric-pill {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    margin-right: 6px;
+    margin-bottom: 4px;
+}
+.pattern-pill-bull { background-color: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.pattern-pill-bear { background-color: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+.pattern-pill-neutral { background-color: #fef9c3; color: #a16207; border: 1px solid #fef08a; }
+
 .inspector-card {
     background-color: #ffffff;
     border: 1px solid #e2e8f0;
@@ -1387,7 +1408,12 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                         "neckline": round(neckline, 2),
                         "target": round(neckline - depth, 2),
                         "stop_loss": round(p2[1] + (0.5 * atr), 2),
-                        "description": f"Twin resistance peaks near Tk {p2[1]:.1f}. Support neckline at Tk {neckline:.1f}."
+                        "description": f"Twin resistance peaks near Tk {p2[1]:.1f}. Support neckline at Tk {neckline:.1f}.",
+                        "points": [
+                            {"date": p1[0], "price": p1[1], "label": "Peak 1"},
+                            {"date": mid_troughs[0][0], "price": mid_troughs[0][1], "label": "Trough"},
+                            {"date": p2[0], "price": p2[1], "label": "Peak 2"}
+                        ]
                     })
 
     if len(troughs) >= 2:
@@ -1408,7 +1434,12 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                         "neckline": round(neckline, 2),
                         "target": round(neckline + height, 2),
                         "stop_loss": round(t2[1] - (0.5 * atr), 2),
-                        "description": f"Twin support troughs near Tk {t2[1]:.1f}. Resistance neckline at Tk {neckline:.1f}."
+                        "description": f"Twin support troughs near Tk {t2[1]:.1f}. Resistance neckline at Tk {neckline:.1f}.",
+                        "points": [
+                            {"date": t1[0], "price": t1[1], "label": "Trough 1"},
+                            {"date": mid_peaks[0][0], "price": mid_peaks[0][1], "label": "Peak"},
+                            {"date": t2[0], "price": t2[1], "label": "Trough 2"}
+                        ]
                     })
 
     # 2. HEAD AND SHOULDERS & INVERSE HEAD AND SHOULDERS
@@ -1429,7 +1460,12 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                     "neckline": round(neckline, 2),
                     "target": round(neckline - height, 2),
                     "stop_loss": round(p3[1] + (0.5 * atr), 2),
-                    "description": f"Head peak: Tk {p2[1]:.1f}, Shoulders: Tk {p1[1]:.1f} & Tk {p3[1]:.1f}."
+                    "description": f"Head peak: Tk {p2[1]:.1f}, Shoulders: Tk {p1[1]:.1f} & Tk {p3[1]:.1f}.",
+                    "points": [
+                        {"date": p1[0], "price": p1[1], "label": "L.Shoulder"},
+                        {"date": p2[0], "price": p2[1], "label": "Head"},
+                        {"date": p3[0], "price": p3[1], "label": "R.Shoulder"}
+                    ]
                 })
 
     if len(troughs) >= 3:
@@ -1449,7 +1485,12 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                     "neckline": round(neckline, 2),
                     "target": round(neckline + height, 2),
                     "stop_loss": round(t3[1] - (0.5 * atr), 2),
-                    "description": f"Inverse Head trough: Tk {t2[1]:.1f}, Shoulders: Tk {t1[1]:.1f} & Tk {t3[1]:.1f}."
+                    "description": f"Inverse Head trough: Tk {t2[1]:.1f}, Shoulders: Tk {t1[1]:.1f} & Tk {t3[1]:.1f}.",
+                    "points": [
+                        {"date": t1[0], "price": t1[1], "label": "L.Shoulder"},
+                        {"date": t2[0], "price": t2[1], "label": "Inv Head"},
+                        {"date": t3[0], "price": t3[1], "label": "R.Shoulder"}
+                    ]
                 })
 
     # 3. TRIANGLES & WEDGES
@@ -1465,6 +1506,9 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
         upper_current = slope_high * (recent_bars - 1) + intercept_high
         lower_current = slope_low * (recent_bars - 1) + intercept_low
 
+        start_dt = df.index[-recent_bars]
+        end_dt = df.index[-1]
+
         # Ascending Triangle
         if abs(slope_high) < 0.05 and slope_low > 0.08:
             patterns.append({
@@ -1476,7 +1520,11 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 "neckline": round(upper_current, 2),
                 "target": round(upper_current + (upper_current - lower_current), 2),
                 "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": f"Horizontal upper resistance near Tk {upper_current:.1f} with ascending higher lows."
+                "description": f"Horizontal upper resistance near Tk {upper_current:.1f} with ascending higher lows.",
+                "lines": [
+                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Resistance Line"},
+                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Ascending Support"}
+                ]
             })
         # Descending Triangle
         elif abs(slope_low) < 0.05 and slope_high < -0.08:
@@ -1489,7 +1537,11 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 "neckline": round(lower_current, 2),
                 "target": round(lower_current - (upper_current - lower_current), 2),
                 "stop_loss": round(upper_current + (0.5 * atr), 2),
-                "description": f"Horizontal lower support near Tk {lower_current:.1f} with descending lower highs."
+                "description": f"Horizontal lower support near Tk {lower_current:.1f} with descending lower highs.",
+                "lines": [
+                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Descending Resistance"},
+                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Support Line"}
+                ]
             })
         # Symmetrical Triangle
         elif slope_high < -0.05 and slope_low > 0.05:
@@ -1502,7 +1554,11 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 "neckline": round(upper_current, 2),
                 "target": round(upper_current + (upper_current - lower_current), 2),
                 "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": f"Converging trendlines between Tk {lower_current:.1f} and Tk {upper_current:.1f}."
+                "description": f"Converging trendlines between Tk {lower_current:.1f} and Tk {upper_current:.1f}.",
+                "lines": [
+                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Upper Trendline"},
+                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Lower Trendline"}
+                ]
             })
         # Falling Wedge (Bullish Reversal)
         elif slope_high < -0.08 and slope_low < -0.04 and slope_high < slope_low:
@@ -1515,7 +1571,11 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 "neckline": round(upper_current, 2),
                 "target": round(upper_current + (2 * atr), 2),
                 "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": "Downward converging wedge channel with waning selling pressure."
+                "description": "Downward converging wedge channel with waning selling pressure.",
+                "lines": [
+                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Falling Resistance"},
+                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Falling Support"}
+                ]
             })
         # Rising Wedge (Bearish Reversal)
         elif slope_high > 0.04 and slope_low > 0.08 and slope_low > slope_high:
@@ -1528,7 +1588,11 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 "neckline": round(lower_current, 2),
                 "target": round(lower_current - (2 * atr), 2),
                 "stop_loss": round(upper_current + (0.5 * atr), 2),
-                "description": "Upward converging wedge channel with exhausting buying volume."
+                "description": "Upward converging wedge channel with exhausting buying volume.",
+                "lines": [
+                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Rising Resistance"},
+                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Rising Support"}
+                ]
             })
 
     # 4. CUP AND HANDLE (Bullish Continuation)
@@ -1584,6 +1648,158 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
                 })
 
     return patterns
+
+# ----------------- MUST-KNOW CANDLESTICK TRIGGERS DETECTOR ----------------- #
+
+def detect_candlestick_patterns_history(df: pd.DataFrame, max_lookback: int = 60) -> list:
+    """
+    Scans the historical candles of the instrument (up to max_lookback periods) to identify
+    high-probability candlestick triggers and their exact timestamps/coordinates for chart overlay.
+    """
+    results = []
+    if len(df) < 3:
+        return results
+
+    sub_df = df.iloc[-max_lookback:] if len(df) > max_lookback else df
+
+    for i in range(1, len(sub_df)):
+        curr = sub_df.iloc[i]
+        prev = sub_df.iloc[i-1]
+        date = sub_df.index[i]
+        
+        c_open, c_close, c_high, c_low = float(curr['open']), float(curr['close']), float(curr['high']), float(curr['low'])
+        p_open, p_close = float(prev['open']), float(prev['close'])
+        c_vol = float(curr.get('volume', 0)) if pd.notnull(curr.get('volume')) else 0.0
+        vma20 = float(curr.get('Vol_SMA_20', c_vol)) if ("Vol_SMA_20" in sub_df.columns and pd.notnull(curr.get('Vol_SMA_20'))) else c_vol
+        atr = float(curr.get('ATR', c_high - c_low)) if ("ATR" in sub_df.columns and pd.notnull(curr.get('ATR'))) else (c_high - c_low)
+
+        c_body = abs(c_close - c_open)
+        c_range = c_high - c_low + 1e-9
+        c_is_green = c_close > c_open
+        p_is_green = p_close > p_open
+
+        # 1. Bullish Engulfing
+        if not p_is_green and c_is_green:
+            if c_open <= p_close and c_close >= p_open and c_body > 0:
+                results.append({
+                    'name': 'Bullish Engulfing',
+                    'type': 'Candlestick Pattern',
+                    'bias': 'Bullish',
+                    'date': date,
+                    'price': c_close,
+                    'y_anchor': c_low,
+                    'arrow_side': 'bottom',
+                    'color': '#10b981',
+                    'description': 'Green candle engulfed previous red body (High buying pressure).'
+                })
+
+        # 2. Bearish Engulfing
+        elif p_is_green and not c_is_green:
+            if c_open >= p_close and c_close <= p_open and c_body > 0:
+                results.append({
+                    'name': 'Bearish Engulfing',
+                    'type': 'Candlestick Pattern',
+                    'bias': 'Bearish',
+                    'date': date,
+                    'price': c_close,
+                    'y_anchor': c_high,
+                    'arrow_side': 'top',
+                    'color': '#ef4444',
+                    'description': 'Red candle engulfed previous green body (Strong rejection).'
+                })
+
+        # 3. Hammer (Bullish Pinbar)
+        lower_shadow = min(c_open, c_close) - c_low
+        upper_shadow = c_high - max(c_open, c_close)
+        if lower_shadow >= 2.0 * c_body and upper_shadow <= (0.35 * c_body + 0.1 * atr):
+            results.append({
+                'name': 'Hammer (Pinbar)',
+                'type': 'Candlestick Pattern',
+                'bias': 'Bullish',
+                'date': date,
+                'price': c_close,
+                'y_anchor': c_low,
+                'arrow_side': 'bottom',
+                'color': '#10b981',
+                'description': f'Long lower shadow rejecting low at Tk {c_low:.1f}.'
+            })
+
+        # 4. Shooting Star (Bearish Pinbar)
+        elif upper_shadow >= 2.0 * c_body and lower_shadow <= (0.35 * c_body + 0.1 * atr):
+            results.append({
+                'name': 'Shooting Star',
+                'type': 'Candlestick Pattern',
+                'bias': 'Bearish',
+                'date': date,
+                'price': c_close,
+                'y_anchor': c_high,
+                'arrow_side': 'top',
+                'color': '#ef4444',
+                'description': f'Long upper wick rejecting high at Tk {c_high:.1f}.'
+            })
+
+        # 5. Morning Star (3-candle bullish reversal)
+        if i >= 2:
+            prev2 = sub_df.iloc[i-2]
+            p2_open, p2_close = float(prev2['open']), float(prev2['close'])
+            p2_body = abs(p2_close - p2_open)
+            p_body = abs(p_close - p_open)
+            if p2_close < p2_open and p_body < (0.5 * p2_body) and c_is_green and c_close > (p2_close + 0.5 * p2_body):
+                results.append({
+                    'name': 'Morning Star',
+                    'type': 'Candlestick Pattern',
+                    'bias': 'Bullish',
+                    'date': date,
+                    'price': c_close,
+                    'y_anchor': c_low,
+                    'arrow_side': 'bottom',
+                    'color': '#10b981',
+                    'description': '3-candle bullish reversal pattern signaling strong turnaround.'
+                })
+
+            # 6. Evening Star (3-candle bearish reversal)
+            elif p2_close > p2_open and p_body < (0.5 * p2_body) and not c_is_green and c_close < (p2_open + 0.5 * p2_body):
+                results.append({
+                    'name': 'Evening Star',
+                    'type': 'Candlestick Pattern',
+                    'bias': 'Bearish',
+                    'date': date,
+                    'price': c_close,
+                    'y_anchor': c_high,
+                    'arrow_side': 'top',
+                    'color': '#ef4444',
+                    'description': '3-candle bearish reversal pattern signaling top exhaustion.'
+                })
+
+        # 7. Bullish Harami
+        if not p_is_green and c_is_green and c_open > p_close and c_close < p_open and (c_body < 0.6 * abs(p_close - p_open)):
+            results.append({
+                'name': 'Bullish Harami',
+                'type': 'Candlestick Pattern',
+                'bias': 'Bullish',
+                'date': date,
+                'price': c_close,
+                'y_anchor': c_low,
+                'arrow_side': 'bottom',
+                'color': '#10b981',
+                'description': 'Inside green bar within prior red candle (Selling exhaustion).'
+            })
+
+        # 8. Doji (Indecision)
+        elif c_body / c_range <= 0.10 and c_range > (0.005 * c_close):
+            results.append({
+                'name': 'Doji Candle',
+                'type': 'Candlestick Pattern',
+                'bias': 'Neutral',
+                'date': date,
+                'price': c_close,
+                'y_anchor': c_high,
+                'arrow_side': 'top',
+                'color': '#8b5cf6',
+                'description': 'Market equilibrium / indecision candle at turning point.'
+            })
+
+    return results
 
 # ----------------- MUST-KNOW CANDLESTICK TRIGGERS DETECTOR ----------------- #
 
@@ -2816,6 +3032,175 @@ def build_advanced_chart(df: pd.DataFrame, ticker: str, patterns: list):
 
     return fig
 
+# ----------------- DEDICATED PATTERN VISUALIZATION CHART (LAST 60 DAYS) ----------------- #
+
+def build_pattern_chart(df: pd.DataFrame, ticker: str, patterns: list, candle_patterns: list):
+    """
+    Renders a dedicated 3-panel technical chart with visual pattern overlays strictly showing
+    the last 60 trading days for clear, spacious candle visibility:
+    - Panel 1: Candlesticks (60 Days) + Moving Averages + Bollinger Bands + Pattern Geometries + Candlestick Callouts
+    - Panel 2: Trading Volume + 20-Day Volume SMA
+    - Panel 3: RSI (14) Momentum Oscillator
+    """
+    # Clean valid trading rows
+    df_valid = df[(df['open'] > 0) & (df['high'] > 0) & (df['low'] > 0) & (df['close'] > 0)].copy()
+
+    # Strictly keep the last 60 trading days for chart rendering
+    df = df_valid.iloc[-60:].copy() if len(df_valid) > 60 else df_valid.copy()
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.64, 0.18, 0.18]
+    )
+
+    # 1. Main Candlestick Series (Last 60 Days)
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'], name='Price'
+    ), row=1, col=1)
+
+    # Overlays
+    if 'EMA_20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], line=dict(color='#f59e0b', width=1.4, dash='dot'), name='20 EMA'), row=1, col=1)
+    if 'SMA_50' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], line=dict(color='#0284c7', width=1.4), name='50 SMA'), row=1, col=1)
+    if 'SMA_200' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_200'], line=dict(color='#9333ea', width=1.6), name='200 SMA'), row=1, col=1)
+
+    if 'BB_Upper' in df.columns and 'BB_Lower' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.35)', dash='dash'), name='Upper BB'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(148, 163, 184, 0.35)', dash='dash'), fill='tonexty', fillcolor='rgba(148, 163, 184, 0.05)', name='Lower BB'), row=1, col=1)
+
+    # 2. Draw Classical Chart Pattern Annotations & Geometric Lines
+    for p in patterns:
+        p_color = "#10b981" if p.get("bias") == "Bullish" else ("#ef4444" if p.get("bias") == "Bearish" else "#8b5cf6")
+        
+        # Neckline
+        if p.get("neckline"):
+            fig.add_hline(
+                y=p["neckline"], line_dash="dash",
+                line_color=p_color, line_width=2.0,
+                annotation_text=f"📐 {p['name']} Neckline: Tk {p['neckline']:.1f}",
+                annotation_position="top right",
+                annotation_font=dict(size=11, color=p_color, family="Arial"),
+                row=1, col=1
+            )
+        
+        # Target Line
+        if p.get("target") and p.get("target") > 0:
+            fig.add_hline(
+                y=p["target"], line_dash="dot",
+                line_color="#059669", line_width=1.5,
+                annotation_text=f"🎯 Target: Tk {p['target']:.1f}",
+                annotation_position="bottom right",
+                annotation_font=dict(size=10.5, color="#059669"),
+                row=1, col=1
+            )
+
+        # Stop Loss Line
+        if p.get("stop_loss") and p.get("stop_loss") > 0:
+            fig.add_hline(
+                y=p["stop_loss"], line_dash="dot",
+                line_color="#dc2626", line_width=1.5,
+                annotation_text=f"🛡️ Stop Loss: Tk {p['stop_loss']:.1f}",
+                annotation_position="top left",
+                annotation_font=dict(size=10.5, color="#dc2626"),
+                row=1, col=1
+            )
+
+        # Structural pivot points (e.g., Double Bottom Trough 1, Peak, Trough 2)
+        if p.get("points"):
+            pts_x = [pt["date"] for pt in p["points"] if pt["date"] in df.index]
+            pts_y = [pt["price"] for pt in p["points"] if pt["date"] in df.index]
+            pts_txt = [pt["label"] for pt in p["points"] if pt["date"] in df.index]
+            if pts_x:
+                fig.add_trace(go.Scatter(
+                    x=pts_x, y=pts_y, mode='lines+markers+text',
+                    line=dict(color=p_color, width=2.2, dash='solid'),
+                    marker=dict(size=9, color=p_color, symbol='diamond'),
+                    text=pts_txt, textposition="bottom center" if p.get("bias") == "Bullish" else "top center",
+                    textfont=dict(size=11, color="#0f172a", family="Arial Black"),
+                    name=f"Pattern: {p['name']}"
+                ), row=1, col=1)
+
+        # Trendlines (Triangles / Wedges)
+        if p.get("lines"):
+            for line_seg in p["lines"]:
+                fig.add_trace(go.Scatter(
+                    x=[line_seg["x0"], line_seg["x1"]],
+                    y=[line_seg["y0"], line_seg["y1"]],
+                    mode='lines',
+                    line=dict(color=line_seg["color"], width=2.0, dash='dash'),
+                    name=line_seg.get("name", "Trendline")
+                ), row=1, col=1)
+
+    # 3. Draw Candlestick Pattern Triggers (Staggered to Prevent Overlapping)
+    visible_candle_patterns = [c for c in candle_patterns if c.get("date") in df.index]
+    bottom_step = 0
+    top_step = 0
+
+    for c_pat in visible_candle_patterns[-8:]:
+        c_date = c_pat["date"]
+        c_bias = c_pat.get("bias", "Neutral")
+        c_color = "#10b981" if c_bias == "Bullish" else ("#ef4444" if c_bias == "Bearish" else "#8b5cf6")
+        c_bg = "#dcfce7" if c_bias == "Bullish" else ("#fee2e2" if c_bias == "Bearish" else "#f3e8ff")
+        c_text_color = "#065f46" if c_bias == "Bullish" else ("#991b1b" if c_bias == "Bearish" else "#581c87")
+        arrow_side = c_pat.get("arrow_side", "bottom")
+        
+        is_bottom = (arrow_side == "bottom")
+        y_val = c_pat.get("y_anchor", df.loc[c_date, 'low' if is_bottom else 'high'])
+        
+        if is_bottom:
+            ay_offset = 32 + ((bottom_step % 3) * 24)
+            bottom_step += 1
+        else:
+            ay_offset = -(32 + ((top_step % 3) * 24))
+            top_step += 1
+
+        fig.add_annotation(
+            x=c_date, y=y_val,
+            text=f"🕯️ {c_pat['name']}",
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1.5,
+            arrowcolor=c_color,
+            ax=0,
+            ay=ay_offset,
+            bgcolor=c_bg,
+            bordercolor=c_color,
+            borderwidth=1,
+            borderpad=3,
+            font=dict(size=10, color=c_text_color, family="Arial Black"),
+            row=1, col=1
+        )
+
+    # Panel 2: Volume + 20-Day VMA
+    vol_colors = np.where(df['close'] >= df['open'], '#10b981', '#ef4444')
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=vol_colors, name='Volume'), row=2, col=1)
+    if 'Vol_SMA_20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['Vol_SMA_20'], line=dict(color='#3b82f6', width=1.5), name='20-Day VMA'), row=2, col=1)
+
+    # Panel 3: RSI (14)
+    if 'RSI' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.5), name='RSI (14)'), row=3, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#ef4444", line_width=1, row=3, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#10b981", line_width=1, row=3, col=1)
+
+    fig.update_layout(
+        height=780,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=25, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    fig.update_yaxes(title_text="Price (Tk)", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="RSI (14)", range=[0, 100], row=3, col=1)
+
+    return fig
+
 # ----------------- MAIN APPLICATION VIEW ----------------- #
 
 live_data = get_live_market_feeds()
@@ -2878,7 +3263,7 @@ st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
 # ----------------- MAIN TABS STRUCTURE ----------------- #
 
-tab_market, tab_forecast, tab_best15, tab_screener, tab_news = st.tabs(["⚡ Live Market Stream", "🔮 5-Day Forecast", "🌟 Best 15", "🎯 Screener", "📰 News"])
+tab_market, tab_forecast, tab_best15, tab_screener, tab_patterns, tab_news = st.tabs(["⚡ Live Market Stream", "🔮 5-Day Forecast", "🌟 Best 15", "🎯 Screener", "📐 Patterns Detected", "📰 News"])
 
 with tab_market:
     # 1. Main Live Index Bar
@@ -3996,3 +4381,271 @@ with tab_screener:
     } for r in filtered_screener])
 
     st.dataframe(clean_df, width="stretch", hide_index=True)
+
+# ----------------- TAB: PATTERNS DETECTED ----------------- #
+
+with tab_patterns:
+    st.subheader("📐 Detected Technical Patterns & Candlestick Scanner (প্যাটার্ন অ্যানালাইসিস)")
+    st.caption("AI-driven pattern recognition engine scanning DSE instruments for Classical Chart Patterns (Double Bottom/Top, Head & Shoulders, Triangles, Wedges, Cup & Handle, Bull Flags) and High-Probability Candlestick Triggers (Engulfing, Hammer, Shooting Star, Morning/Evening Star, Doji).")
+
+    all_symbols = sorted(list(unified_quotes.keys()))
+    if not all_symbols:
+        all_symbols = [s["symbol"] for s in WATCHLIST_STOCKS]
+
+    # Pre-scan candidate pool (Watchlist + Top active volume stocks)
+    candidate_symbols = list(dict.fromkeys([s["symbol"] for s in WATCHLIST_STOCKS] + sorted(all_symbols, key=lambda s: unified_quotes.get(s, {}).get("volume", 0), reverse=True)[:35]))
+
+    active_pattern_stocks = []
+    pattern_market_records = []
+    bullish_pat_count = 0
+    bearish_pat_count = 0
+    candle_trigger_count = 0
+
+    for sym in candidate_symbols:
+        q = unified_quotes.get(sym, {})
+        ltp = float(q.get("ltp", 0.0))
+        high = float(q.get("high", 0.0))
+        low = float(q.get("low", 0.0))
+        vol = float(q.get("volume", 0.0))
+        ycp = float(q.get("ycp", 0.0))
+        chg = float(q.get("change", 0.0))
+        pct = float(q.get("pct_change", 0.0))
+
+        df_sym = fetch_authentic_history(sym, days=180)
+        if not df_sym.empty and len(df_sym) >= 15:
+            if ltp > 0:
+                today_dt = pd.Timestamp(get_bangladesh_today())
+                if today_dt in df_sym.index:
+                    df_sym.loc[today_dt, 'close'] = ltp
+                    df_sym.loc[today_dt, 'high'] = max(df_sym.loc[today_dt, 'high'], high or ltp)
+                    df_sym.loc[today_dt, 'low'] = min(df_sym.loc[today_dt, 'low'], low or ltp)
+                    df_sym.loc[today_dt, 'volume'] = vol
+                else:
+                    df_sym = pd.concat([df_sym, pd.DataFrame([{'open': ltp, 'high': high or ltp, 'low': low or ltp, 'close': ltp, 'volume': vol}], index=[today_dt])])
+            
+            analyzed_sym = compute_all_indicators(df_sym)
+            c_pats = detect_chart_patterns(analyzed_sym)
+            latest_k = detect_candlestick_triggers(analyzed_sym)
+
+            if len(c_pats) > 0 or len(latest_k) > 0:
+                active_pattern_stocks.append(sym)
+                
+                chart_pat_names = [p["name"] for p in c_pats]
+                candle_pat_names = [k["name"] for k in latest_k]
+
+                bull_count = sum(1 for p in c_pats if p["bias"] == "Bullish") + sum(1 for k in latest_k if k["bias"] == "Bullish")
+                bear_count = sum(1 for p in c_pats if p["bias"] == "Bearish") + sum(1 for k in latest_k if k["bias"] == "Bearish")
+
+                if bull_count > bear_count:
+                    bias_label = "🟢 Bullish Setup"
+                    bullish_pat_count += 1
+                elif bear_count > bull_count:
+                    bias_label = "🔴 Bearish Warning"
+                    bearish_pat_count += 1
+                else:
+                    bias_label = "⚪ Neutral / Bilateral"
+
+                candle_trigger_count += len(latest_k)
+
+                target_val = c_pats[0]["target"] if (c_pats and c_pats[0].get("target")) else (ltp * 1.05 if ltp > 0 else 0.0)
+                sl_val = c_pats[0]["stop_loss"] if (c_pats and c_pats[0].get("stop_loss")) else (ltp * 0.95 if ltp > 0 else 0.0)
+
+                pattern_market_records.append({
+                    "SYMBOL": sym,
+                    "LTP (Tk)": ltp,
+                    "CHANGE (%)": f"{'+' if pct > 0 else ''}{pct:.2f}%",
+                    "BIAS": bias_label,
+                    "CHART PATTERNS": ", ".join(chart_pat_names) if chart_pat_names else "Consolidating / Range",
+                    "CANDLESTICK TRIGGERS": ", ".join(candle_pat_names) if candle_pat_names else "None",
+                    "TARGET (Tk)": round(target_val, 2),
+                    "STOP LOSS (Tk)": round(sl_val, 2)
+                })
+
+    # Summary Metrics Row
+    pm_c1, pm_c2, pm_c3, pm_c4 = st.columns(4)
+    with pm_c1:
+        st.metric("Total Pattern Setups", len(pattern_market_records))
+    with pm_c2:
+        st.metric("🟢 Bullish Patterns Active", bullish_pat_count)
+    with pm_c3:
+        st.metric("🔴 Bearish Patterns Active", bearish_pat_count)
+    with pm_c4:
+        st.metric("🕯️ Candlestick Triggers Active", candle_trigger_count)
+
+    st.write("---")
+
+    # Interactive Controls: Stock Dropdown & Filters
+    ctrl_c1, ctrl_c2 = st.columns([2.5, 1.5])
+    
+    with ctrl_c2:
+        filter_mode = st.radio(
+            "Filter Stock List",
+            ["Patterns Found Only", "All DSE Stocks"],
+            horizontal=True
+        )
+
+    if filter_mode == "Patterns Found Only" and active_pattern_stocks:
+        selectable_symbols = [s for s in active_pattern_stocks if s in all_symbols]
+        if not selectable_symbols:
+            selectable_symbols = all_symbols
+    else:
+        selectable_symbols = all_symbols
+
+    def format_sym_label(s):
+        if s in active_pattern_stocks:
+            return f"🎯 {s}  [⚡ Pattern Found]"
+        return f"📈 {s}"
+
+    with ctrl_c1:
+        selected_stock = st.selectbox(
+            "🔍 Choose Stock Item to Inspect & Visualize Marked Chart (Last 60 Days):",
+            selectable_symbols,
+            format_func=format_sym_label,
+            index=0
+        )
+
+    if selected_stock:
+        q_sel = unified_quotes.get(selected_stock, {})
+        ltp_sel = float(q_sel.get("ltp", 0.0))
+        high_sel = float(q_sel.get("high", 0.0))
+        low_sel = float(q_sel.get("low", 0.0))
+        vol_sel = float(q_sel.get("volume", 0.0))
+        ycp_sel = float(q_sel.get("ycp", 0.0))
+        chg_sel = float(q_sel.get("change", 0.0))
+        pct_sel = float(q_sel.get("pct_change", 0.0))
+
+        # Full technical analysis
+        stock_analysis = get_comprehensive_stock_analysis(
+            selected_stock, ltp_sel, high_sel, low_sel, vol_sel, ycp_sel, chg_sel, pct_sel
+        )
+        analyzed_df = stock_analysis["df_indicators"]
+        detected_chart_patterns = stock_analysis["patterns"]
+        
+        detected_candle_patterns = detect_candlestick_patterns_history(analyzed_df, max_lookback=60)
+        latest_triggers = detect_candlestick_triggers(analyzed_df)
+
+        # Selected Stock Header & Live Metrics Bar
+        st.markdown(f"""
+        <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <span style="font-size: 20px; font-weight: 900; color: #0f172a; margin-right: 8px;">{selected_stock}</span>
+                <span style="font-size: 14px; font-weight: 800; color: {'#00C853' if chg_sel >= 0 else '#D50000'};">Tk {ltp_sel:.1f} ({'+' if pct_sel > 0 else ''}{pct_sel:.2f}%)</span>
+                <div style="font-size: 12px; color: #64748b; margin-top: 2px;">
+                    Day Range: Tk {low_sel:.1f} – {high_sel:.1f} • Vol: {int(vol_sel):,} • Action: <b style="color: {stock_analysis['color']};">{stock_analysis['action']}</b>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <span class="pattern-metric-pill" style="background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;">
+                    📐 {len(detected_chart_patterns)} Chart Patterns
+                </span>
+                <span class="pattern-metric-pill" style="background: #faf5ff; color: #7e22ce; border: 1px solid #e9d5ff;">
+                    🕯️ {len(detected_candle_patterns)} Candlestick Signals Marked
+                </span>
+                <span class="pattern-metric-pill" style="background: {stock_analysis['move_bg']}; color: {stock_analysis['move_color']}; border: 1px solid {stock_analysis['move_border']};">
+                    {stock_analysis['move_badge']}
+                </span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Pattern Cards Grid
+        if detected_chart_patterns or latest_triggers:
+            st.markdown("##### 🔍 সক্রিয় চার্ট ও ক্যান্ডেলস্টিক প্যাটার্নসমূহ (Active Formations & Setups):")
+            card_cols = st.columns(max(1, min(3, len(detected_chart_patterns) + (1 if latest_triggers else 0))))
+            col_idx = 0
+
+            # Classical Chart Pattern Cards
+            for cp in detected_chart_patterns:
+                with card_cols[col_idx % len(card_cols)]:
+                    badge_cls = "pattern-pill-bull" if cp["bias"] == "Bullish" else ("pattern-pill-bear" if cp["bias"] == "Bearish" else "pattern-pill-neutral")
+                    status_color = "#15803d" if cp["bias"] == "Bullish" else ("#b91c1c" if cp["bias"] == "Bearish" else "#a16207")
+                    
+                    st.markdown(f"""
+                    <div class="pattern-detail-card" style="border-left: 4px solid {status_color};">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+                            <b style="font-size: 15px; color: #0f172a;">📐 {cp['name']}</b>
+                            <span class="pattern-metric-pill {badge_cls}">{cp['bias']} ({cp['confidence']}%)</span>
+                        </div>
+                        <div style="font-size: 12.5px; font-weight: 700; color: {status_color}; margin-bottom: 6px;">
+                            🎯 অবস্থা: {cp['status']}
+                        </div>
+                        <div style="font-size: 12px; color: #475569; margin-bottom: 8px; line-height: 1.4;">
+                            {cp['description']}
+                        </div>
+                        <div style="display: flex; justify-content: space-between; background: #f8fafc; padding: 6px 10px; border-radius: 6px; font-size: 11.5px;">
+                            <span>নেকলাইন: <b>Tk {cp.get('neckline', 0):.1f}</b></span>
+                            <span style="color: #15803d;">টার্গেট: <b>Tk {cp.get('target', 0):.1f}</b></span>
+                            <span style="color: #b91c1c;">স্টপ লস: <b>Tk {cp.get('stop_loss', 0):.1f}</b></span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    col_idx += 1
+
+            # Candlestick Triggers Card
+            if latest_triggers:
+                with card_cols[col_idx % len(card_cols)]:
+                    st.markdown(f"""
+                    <div class="pattern-detail-card" style="border-left: 4px solid #8b5cf6;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+                            <b style="font-size: 15px; color: #0f172a;">🕯️ সাম্প্রতিক ক্যান্ডেলস্টিক ট্রিগার</b>
+                            <span class="pattern-metric-pill" style="background: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe;">Price Action</span>
+                        </div>
+                        <div style="font-size: 12px; color: #334155; line-height: 1.5;">
+                            {'<br>'.join([f"• <b>{t['name']}</b> ({t['bias']}): {t['description']}" for t in latest_triggers])}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info(f"ℹ️ **{selected_stock}**-এ বর্তমানে কোনো বৃহৎ রিভার্সাল চার্ট প্যাটার্ন ব্রেকআউট প্রক্রিয়াধীন নেই। প্রাইস ট্রেন্ড ও মুভিং এভারেজ চ্যানেলে অবস্থান করছে। নিচের চার্টে ঐতিহাসিক ক্যান্ডেলস্টিক সংকেতসমূহ সরাসরি মার্ক করা হয়েছে।")
+
+        # Marked Interactive Plotly Graph
+        st.markdown(f"##### 📊 {selected_stock} প্যাটার্ন চিহ্নিত ইন্টারেক্টিভ ক্যান্ডেলস্টিক চার্ট (Marked with Patterns, Necklines & Signals):")
+        pattern_fig = build_pattern_chart(
+            analyzed_df, selected_stock, detected_chart_patterns, detected_candle_patterns
+        )
+        st.plotly_chart(pattern_fig, use_container_width=True)
+
+        # Educational & Trade Execution Guide
+        st.markdown(f"""
+        <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 14px 18px; margin-top: 10px;">
+            <div style="font-size: 13.5px; font-weight: 800; color: #1e293b; margin-bottom: 6px;">
+                💡 প্যাটার্ন ভিত্তিক ট্রেডিং গাইডলাইন ও নিয়মাবলী (How to Trade Patterns Effectively):
+            </div>
+            <ul style="font-size: 12px; color: #475569; margin: 0; padding-left: 18px; line-height: 1.6;">
+                <li><b>ব্রেকআউট নিশ্চিতকরণ (Breakout Confirmation):</b> বুলিশ প্যাটার্নের ক্ষেত্রে নেকলাইনের উপরে ক্যান্ডেল ক্লোজ এবং গড় ভলিউম (20-Day VMA) এর চেয়ে বেশি ভলিউম থাকলে এন্ট্রি নেওয়া নিশ্চিত ফলপ্রসূ হয়।</li>
+                <li><b>স্টপ লস রক্ষণাবেক্ষণ (Strict Stop Loss):</b> চার্টে চিহ্নিত লাল ড্যাশড লাইন (Stop Loss) এর নিচে প্রাইস নেমে গেলে অবিলম্বে পজিশন ক্লোজ করে মূলধন সুরক্ষিত রাখুন।</li>
+                <li><b>টার্গেট বুকিং (Target Execution):</b> সবুজ ড্যাশড লাইনে (Target Price) পৌঁছালে ৫০%-৭০% প্রফিট লক করে ট্রেইলিং স্টপ লস ব্যবহার করা শ্রেয়।</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Market-Wide Pattern Scanner Table
+    st.write("---")
+    st.subheader("📋 সমগ্র মার্কেটের প্যাটার্ন স্ক্যানার টেবিল (All Stocks with Patterns)")
+    st.caption("যেসব শেয়ারে বর্তমানে চার্ট প্যাটার্ন বা গুরুত্বপূর্ণ ক্যান্ডেলস্টিক ট্রিগার শনাক্ত হয়েছে:")
+
+    if pattern_market_records:
+        tbl_col1, tbl_col2 = st.columns([1.5, 2])
+        with tbl_col1:
+            bias_filter = st.selectbox(
+                "Filter Table by Sentiment / Bias",
+                ["All Patterns", "🟢 Bullish Setup Only", "🔴 Bearish Warning Only", "⚪ Neutral / Bilateral Only"]
+            )
+        with tbl_col2:
+            tbl_search = st.text_input("🔍 Search Stock in Pattern Table", "")
+
+        filtered_pat_table = pattern_market_records
+        if bias_filter == "🟢 Bullish Setup Only":
+            filtered_pat_table = [r for r in filtered_pat_table if "Bullish" in r["BIAS"]]
+        elif bias_filter == "🔴 Bearish Warning Only":
+            filtered_pat_table = [r for r in filtered_pat_table if "Bearish" in r["BIAS"]]
+        elif bias_filter == "⚪ Neutral / Bilateral Only":
+            filtered_pat_table = [r for r in filtered_pat_table if "Neutral" in r["BIAS"]]
+
+        if tbl_search.strip():
+            q_pat = tbl_search.strip().lower()
+            filtered_pat_table = [r for r in filtered_pat_table if q_pat in r["SYMBOL"].lower() or q_pat in r["CHART PATTERNS"].lower() or q_pat in r["CANDLESTICK TRIGGERS"].lower()]
+
+        st.dataframe(pd.DataFrame(filtered_pat_table), width="stretch", hide_index=True)
+    else:
+        st.info("🔄 Scanning market for active patterns... Please refresh in a moment.")
