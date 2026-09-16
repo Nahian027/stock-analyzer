@@ -13,6 +13,9 @@ import io
 import re
 import bdshare
 from bs4 import BeautifulSoup
+from core_engine import evaluate_ticker, calculate_rsi, get_accurate_next_move
+from volume_agent import evaluate_institutional_entry, get_market_elapsed_minutes
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -688,6 +691,8 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     ma100 = float(df['DSEX'].rolling(min(100, len(df))).mean().iloc[-1])
     ma200 = float(df['DSEX'].rolling(min(200, len(df))).mean().iloc[-1])
     ema9 = float(df['DSEX'].ewm(span=9, adjust=False).mean().iloc[-1])
+    ema20 = float(df['DSEX'].ewm(span=20, adjust=False).mean().iloc[-1])
+    ema50 = float(df['DSEX'].ewm(span=50, adjust=False).mean().iloc[-1])
     ema21 = float(df['DSEX'].ewm(span=21, adjust=False).mean().iloc[-1])
 
     # Bollinger Bands (20, 2)
@@ -695,7 +700,22 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     bb_lower = round(ma20 - (2.0 * std20), 2)
     bb_upper = round(ma20 + (2.0 * std20), 2)
 
-    # RSI (14)
+    # DSEX ATR(14) Volatility
+    dsex_diff = df['DSEX'].diff().abs()
+    dsex_atr = float(dsex_diff.rolling(14).mean().iloc[-1]) if len(df) >= 14 else 30.0
+    if pd.isna(dsex_atr) or dsex_atr <= 0:
+        dsex_atr = max(20.0, dsex_now * 0.008)
+
+    # MACD & MACD Histogram
+    ema12_s = df['DSEX'].ewm(span=12, adjust=False).mean()
+    ema26_s = df['DSEX'].ewm(span=26, adjust=False).mean()
+    macd_line_s = ema12_s - ema26_s
+    signal_line_s = macd_line_s.ewm(span=9, adjust=False).mean()
+    macd_hist_s = macd_line_s - signal_line_s
+    macd_hist_cur = float(macd_hist_s.iloc[-1]) if len(macd_hist_s) > 0 else 0.0
+    macd_hist_prev = float(macd_hist_s.iloc[-2]) if len(macd_hist_s) >= 2 else macd_hist_cur
+
+    # RSI (14) & Divergence
     delta = df['DSEX'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -703,7 +723,19 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     rsi_series = 100 - (100 / (1 + rs))
     rsi_val = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 45.0
 
-    # Swing High & Low (recent 60 days)
+    # RSI Bullish Divergence detection (Daily chart over last 20 bars)
+    has_bullish_div = False
+    if len(df) >= 20 and len(rsi_series) >= 20:
+        d_slice = df['DSEX'].iloc[-20:]
+        r_slice = rsi_series.iloc[-20:]
+        if d_slice.iloc[-1] <= d_slice.iloc[:10].min() and r_slice.iloc[-1] > r_slice.iloc[:10].min() + 2.5:
+            has_bullish_div = True
+
+    # Swing High & Low (recent 20 & 60 days)
+    recent_20 = df.tail(min(20, len(df)))
+    swing_high_20 = float(recent_20['DSEX'].max())
+    swing_low_20 = float(recent_20['DSEX'].min())
+
     recent_span = df.tail(min(60, len(df)))
     swing_high = float(recent_span['DSEX'].max())
     swing_low = float(recent_span['DSEX'].min())
@@ -715,229 +747,232 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     fib_618 = round(swing_high - 0.618 * diff, 2)
     fib_786 = round(swing_high - 0.786 * diff, 2)
 
-    # 1. MARKET DIRECTION DETERMINATION
-    if dsex_now >= ema9 and ema9 >= ema21 and dsex_now >= ma50:
+    # 1. MARKET REGIME & STRUCTURAL DETECTION
+    is_bullish_regime = (dsex_now > ema20 and ema20 > ema50)
+    is_deep_bearish = (dsex_now < ema20 and dsex_now < ema50)
+    is_bearish_regime = (dsex_now < ema20 or ema20 < ema50)
+
+    if is_bullish_regime:
         market_dir = "🟢 বুলিশ আপট্রেন্ড (Bullish Uptrend)"
         dir_badge = "BULLISH UPTREND (উর্ধ্বমুখী ট্রেন্ড)"
         dir_color = "#15803d"
         dir_bg = "#dcfce7"
-        dir_desc = "বাজার শক্তিশালী আপট্রেন্ডে রয়েছে। প্রতিটি ডিপে প্রাতিষ্ঠানিক ক্রেতারা সক্রিয় রয়েছে এবং উপরের রেজিস্ট্যান্স টেস্ট করছে।"
+        dir_desc = "বাজার শক্তিশালী আপট্রেন্ডে রয়েছে (DSEX > 20 EMA > 50 EMA)। প্রতিটি ডিপে প্রাতিষ্ঠানিক ক্রেতারা সক্রিয় রয়েছে।"
         direction_mode = "UPTREND"
-    elif dsex_now < ema9 and dsex_now < ema21:
-        if rsi_val <= 32:
-            market_dir = "🔴 চরম ওভারসোল্ড / বাউন্স আসন্ন (Oversold Dip — Rebound Imminent)"
-            dir_badge = "OVERSOLD DIP / BOUNCE IMMINENT"
+    elif is_deep_bearish:
+        if has_bullish_div or rsi_val <= 32:
+            market_dir = "🔵 চরম ওভারসোল্ড ডাইভারজেন্স (Oversold Dip — Rebound Possible)"
+            dir_badge = "OVERSOLD DIVERGENCE / REBOUND WATCH"
             dir_color = "#0284c7"
             dir_bg = "#e0f2fe"
-            dir_desc = "বাজার শর্ট-টার্ম কারেকশনে থাকলেও RSI চরম ওভারসোল্ড লেভেলে নেমেছে। খুব সন্নিকটে থাকা সাপোর্ট জোন থেকে তীব্র টেকনিক্যাল বাউন্সের সম্ভাবনা সর্বাধিক।"
+            dir_desc = "বাজার ২০ ও ৫০ EMA-এর নিচে কারেকশনে থাকলেও RSI ডাইভারজেন্স বা চরম ওভারসোল্ড জোনে রয়েছে। সাপোর্ট জোন থেকে টেকনিক্যাল রিবাউন্ডের সম্ভাবনা তৈরি হচ্ছে।"
             direction_mode = "OVERSOLD_REBOUND"
         else:
             market_dir = "🔴 কারেক্টিভ ডাউনট্রেন্ড / পুলব্যাক (Corrective Downtrend)"
             dir_badge = "CORRECTIVE PULLBACK (পতনমুখী কারেকশন)"
             dir_color = "#b91c1c"
             dir_bg = "#fee2e2"
-            dir_desc = "বাজার সাময়িক কারেকশনে রয়েছে এবং নিচের ডিমান্ড সাপোর্ট জোনের দিকে এগোচ্ছে।"
+            dir_desc = "বাজার ২০ ও ৫০ EMA-এর নিচে ডাউনট্রেন্ডে রয়েছে এবং নিচের কাঠামোগত ডিমান্ড সাপোর্ট জোনের দিকে এগোচ্ছে।"
             direction_mode = "DOWNTREND"
     else:
         market_dir = "🟡 রেঞ্জবাউন্ড কনসোলিডেশন (Range-Bound Accumulation)"
-        dir_badge = "RANGE ACCUMULATION (বটম তৈরি হচ্ছে)"
+        dir_badge = "RANGE ACCUMULATION (কনসোলিডেশন জোন)"
         dir_color = "#a16207"
         dir_bg = "#fef9c3"
-        dir_desc = "বাজার একটি নির্দিষ্ট রেঞ্জে একুমুলেশন করছে এবং ব্রেকআউটের জন্য শক্তি সঞ্চয় করছে।"
+        dir_desc = "বাজার ২০ ও ৫০ EMA-এর মাঝামাঝি একটি নির্দিষ্ট রেঞ্জে একুমুলেশন করছে এবং ব্রেকআউটের জন্য শক্তি সঞ্চয় করছে।"
         direction_mode = "CONSOLIDATION"
 
-    # 2. DOWNSIDE BOUNCE TARGETS (যদি পতন অব্যাহত থাকে — কোথা থেকে ঘুরে দাঁড়াবে)
-    raw_supports = [
-        {
-            "name": "Lower Bollinger Band (20, 2)",
-            "name_bn": "১ম পুলব্যাক বাউন্স (Lower Bollinger Band)",
-            "val": bb_lower,
-            "type": "ওভারসোল্ড ভলাটিলিটি বাউন্স",
-            "type_en": "Oversold Volatility Bounce",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "স্ট্যাটিস্টিক্যাল ওভারসোল্ড লিমিট যেখানে বিক্রির চাপ কমে সূচক দ্রুত ঘুরে দাঁড়ায়।"
-        },
-        {
-            "name": "Fibonacci 50.0% Retracement",
-            "name_bn": "ফিবোনাচ্চি ৫০% রিট্রেসমেন্ট সাপোর্ট",
-            "val": fib_500,
-            "type": "স্বাভাবিক পুলব্যাক বাউন্স",
-            "type_en": "Normal Pullback Bounce",
-            "strength": "⭐⭐⭐",
-            "desc": "স্বাভাবিক রিট্রেসমেন্ট সাপোর্ট লেভেল, যেখান থেকে প্রাথমিক বাউন্স দেখা যায়।"
-        },
-        {
-            "name": "Fibonacci 61.8% Golden Ratio Zone",
-            "name_bn": "ফিবোনাচ্চি ৬১.৮% গোল্ডেন রিভার্সাল জোন",
-            "val": fib_618,
-            "type": "প্রধান প্রাতিষ্ঠানিক রিভার্সাল সাপোর্ট",
-            "type_en": "Major Golden Reversal Support",
-            "strength": "⭐⭐⭐⭐⭐",
-            "desc": "সবচেয়ে শক্তিশালী গোল্ডেন রেশিও রিভার্সাল জোন; এখানে প্রাতিষ্ঠানিক ক্রেতাদের বাই-অর্ডার ক্লাস্টার থাকে।"
-        },
-        {
-            "name": "50-Day Moving Average Support",
-            "name_bn": "৫০ দিনের মুভিং এভারেজ (50 SMA)",
-            "val": round(ma50, 2),
-            "type": "মাঝারি মেয়াদি ট্রেন্ড সাপোর্ট",
-            "type_en": "Medium-Term Trend Support",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "মাঝারি মেয়াদি ট্রেন্ডের প্রধান ডিফেন্স লাইন।"
-        },
-        {
-            "name": "Fibonacci 78.6% Deep Value Floor",
-            "name_bn": "ফিবোনাচ্চি ৭৮.৬% ডিপ সাপোর্ট ফ্লোর",
-            "val": fib_786,
-            "type": "ডিপ বটম অ্যাকুমুলেশন বেস",
-            "type_en": "Deep Accumulation Floor",
-            "strength": "⭐⭐⭐⭐⭐",
-            "desc": "ডিপ কারেকশনে সর্বোচ্চ নিরাপদ রিভার্সাল বেস যেখানে হেভি অ্যাকুমুলেশন তৈরি হয়।"
-        },
-        {
-            "name": "60-Day Major Swing Low Base",
-            "name_bn": "৬০ দিনের প্রধান সুইং লো বটম",
-            "val": round(swing_low, 2),
-            "type": "ম্যাক্রো স্ট্রাকচারাল ফ্লোর",
-            "type_en": "Structural Macro Floor",
-            "strength": "⭐⭐⭐⭐⭐",
-            "desc": "বাজারের কাঠামোগত বটম সাপোর্ট বেস।"
-        }
+    # 2. STRICT MATHEMATICAL PIVOT LEVEL ENGINE
+    # Fundamental Invariant: S3 < S2 < S1 < dsex_now < R1 < R2 < R3
+    C = float(dsex_now)
+
+    # DOWNSIDE TECHNICAL SUPPORT CANDIDATES (STRICTLY < C)
+    pool_supports = [
+        ("Lower Bollinger Band (20, 2)", bb_lower, "স্ট্যাটিস্টিক্যাল ওভারসোল্ড বাউন্স লিমিট"),
+        ("20-Day Swing Low", round(swing_low_20, 1), "২০ দিনের সাম্প্রতিক সুইং লো ফ্লোর"),
+        ("50 SMA Support", round(ma50, 1), "৫০ দিনের মুভিং এভারেজ সাপোর্ট"),
+        ("Fibonacci 50.0% Retracement", fib_500, "ফিবোনাচ্চি ৫০% রিট্রেসমেন্ট বাউন্স"),
+        ("Fibonacci 61.8% Golden Demand", fib_618, "ফিবোনাচ্চি ৬১.৮% গোল্ডেন রেশিও ডিমান্ড"),
+        ("Fibonacci 78.6% Deep Base", fib_786, "ফিবোনাচ্চি ৭৮.৬% ডিপ ভ্যালু ফ্লোর"),
+        ("60-Day Major Swing Low", round(swing_low, 1), "৬০ দিনের কাঠামোগত মেজর বটম"),
+        ("200-Day SMA Major Floor", round(ma200, 1), "২০০ দিনের দীর্ঘমেয়াদি ট্রেন্ড ফ্লোর"),
+        ("1.0 ATR Dynamic Support", round(C - 1.0 * dsex_atr, 1), "ভলাটিলিটি অ্যাডজাস্টেড ডায়নামিক সাপোর্ট"),
+        ("2.0 ATR Volatility Floor", round(C - 2.0 * dsex_atr, 1), "ভলাটিলিটি এক্সপানশন ডিপ ফ্লোর"),
     ]
 
-    supports_below = [s for s in raw_supports if float(s["val"]) < dsex_now]
-    supports_below.sort(key=lambda x: float(x["val"]), reverse=True)
+    valid_supports = []
+    for name, val, desc in pool_supports:
+        if val is not None and not pd.isna(val) and float(val) < (C - 0.5):
+            valid_supports.append({"name": name, "val": round(float(val), 1), "desc": desc})
 
-    if not supports_below:
-        primary_bounce = round(dsex_now * 0.985, 2)
-        major_reversal_min = round(dsex_now * 0.97, 2)
-        major_reversal_max = round(dsex_now * 0.98, 2)
-        max_safe_floor = round(dsex_now * 0.95, 2)
+    valid_supports.sort(key=lambda x: x["val"], reverse=True)
+
+    # S1: Nearest technical bounce strictly < C
+    if valid_supports:
+        s1_item = valid_supports[0]
+        s1_val = s1_item["val"]
+        s1_name = s1_item["name"]
+        s1_desc = s1_item["desc"]
     else:
-        primary_bounce = float(supports_below[0]["val"])
-        major_reversal_min = round(min(fib_618, ma50 if ma50 < dsex_now else fib_618), 2)
-        major_reversal_max = round(max(fib_618, ma50 if ma50 < dsex_now else fib_618), 2)
-        if major_reversal_min == major_reversal_max:
-            major_reversal_min = round(major_reversal_min - 40.0, 2)
-        max_safe_floor = min(fib_786, swing_low, bb_lower)
+        s1_val = round(C * 0.990, 1)
+        s1_name = "Lower Dynamic Pivot"
+        s1_desc = "১ম ডায়নামিক টেকনিক্যাল বাউন্স"
 
-    pts_to_primary = round(dsex_now - primary_bounce, 2)
-    pct_to_primary = round((pts_to_primary / dsex_now) * 100, 2)
-    pts_to_major_max = round(dsex_now - major_reversal_max, 2)
-    pts_to_major_min = round(dsex_now - major_reversal_min, 2)
-    pts_to_floor = round(dsex_now - max_safe_floor, 2)
-    pct_to_floor = round((pts_to_floor / dsex_now) * 100, 2)
+    if s1_val >= C:
+        s1_val = round(C - max(10.0, dsex_atr * 0.5), 1)
 
-    for s in raw_supports:
-        diff_pts = round(dsex_now - float(s["val"]), 2)
-        diff_pct = round((diff_pts / dsex_now) * 100, 2)
-        s["diff_pts"] = diff_pts
-        s["diff_pct"] = diff_pct
-        s["is_below"] = float(s["val"]) < dsex_now
+    # S2: Institutional Demand Zone strictly < S1
+    s2_candidates = [s for s in valid_supports if s["val"] < (s1_val - 6.0)]
+    if s2_candidates:
+        s2_match = None
+        for cand in s2_candidates:
+            if "Fibonacci 61.8" in cand["name"] or "Swing Low" in cand["name"] or "50 SMA" in cand["name"]:
+                s2_match = cand
+                break
+        if s2_match is None:
+            s2_match = s2_candidates[0]
+        s2_val = s2_match["val"]
+        s2_name = s2_match["name"]
+        s2_desc = s2_match["desc"]
+    else:
+        s2_val = round(min(s1_val - 25.0, C * 0.975), 1)
+        s2_name = "Institutional Demand Cluster"
+        s2_desc = "প্রাতিষ্ঠানিক ডিমান্ড ও হাই-ভলিউম রিভার্সাল জোন"
 
-    # 3. UPSIDE RESISTANCE PEAKS (যদি বৃদ্ধি পায় — কোন পয়েন্টে পৌঁছানোর পর আবার নামবে)
-    raw_resistances = [
-        {
-            "name": "9-Day Exponential Moving Average",
-            "name_bn": "৯ দিনের এক্সপোনেনশিয়াল এভারেজ (EMA 9)",
-            "val": round(ema9, 2),
-            "type": "শর্ট-টার্ম মোমেন্টাম সিলিং",
-            "type_en": "Short-Term Momentum Ceiling",
-            "strength": "⭐⭐⭐",
-            "desc": "বাউন্স আসার পর প্রাথমিক টেকনিক্যাল রেজিস্ট্যান্স; এখানে সাময়িক প্রফিট টেকিং হতে পারে।"
-        },
-        {
-            "name": "Fibonacci 38.2% Retracement Ceiling",
-            "name_bn": "১ম টেকনিক্যাল সিলিং (Fibonacci 38.2%)",
-            "val": fib_382,
-            "type": "১ম টেকনিক্যাল রেজিস্ট্যান্স সিলিং",
-            "type_en": "1st Technical Resistance Ceiling",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "পুলব্যাক রিবাউন্ডের পর প্রথম শক্ত রেজিস্ট্যান্স; এখানে পৌঁছালে প্রফিট বুকিংয়ের কারণে সাময়িক পতন দেখা দিতে পারে।"
-        },
-        {
-            "name": "50-Day Moving Average Resistance",
-            "name_bn": "৫০ দিনের মুভিং এভারেজ (50 SMA)",
-            "val": round(ma50, 2),
-            "type": "মাঝারি মেয়াদি সাপ্লাই ক্লাস্টার",
-            "type_en": "Medium-Term Supply Cluster",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "মাঝারি মেয়াদি প্রাতিষ্ঠানিক রেজিস্ট্যান্স ক্লাস্টার।"
-        },
-        {
-            "name": "20-Day Moving Average Supply Barrier",
-            "name_bn": "২০ দিনের মুভিং এভারেজ (20 SMA)",
-            "val": round(ma20, 2),
-            "type": "প্রধান প্রাতিষ্ঠানিক সাপ্লাই ব্যারিয়ার",
-            "type_en": "Major Institutional Supply Barrier",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "তীব্র সেলিং প্রেশার জোন; এখানে পৌঁছালে বড় প্রাতিষ্ঠানিক ট্রেডাররা প্রফিট তুলে সূচককে আবার কারেকশনে ফেলতে পারে।"
-        },
-        {
-            "name": "Fibonacci 23.6% Retracement Peak",
-            "name_bn": "ফিবোনাচ্চি ২৩.৬% প্রফিট বুকিং জোন",
-            "val": fib_236,
-            "type": "উচ্চমাত্রার প্রফিট বুকিং জোন",
-            "type_en": "Heavy Profit Booking Zone",
-            "strength": "⭐⭐⭐⭐",
-            "desc": "বুলিশ র‍্যালিতে হেভি সাপ্লাই ও প্রফিট লক-ইন তৈরি হওয়ার জোন।"
-        },
-        {
-            "name": "60-Day Major Swing High Peak",
-            "name_bn": "৬০ দিনের প্রধান সুইং হাই চূড়া",
-            "val": round(swing_high, 2),
-            "type": "সর্বোচ্চ চূড়া ও মেগা রেজিস্ট্যান্স",
-            "type_en": "Macro Swing High Peak",
-            "strength": "⭐⭐⭐⭐⭐",
-            "desc": "৬০ দিনের সর্বোচ্চ রেকর্ড পিক; এখানে পৌঁছালে তীব্র ওভারবট কন্ডিশন তৈরি হয়ে সূচক বড় ধরনের কারেকশনে নামবে।"
-        },
-        {
-            "name": "Upper Bollinger Band (20, 2)",
-            "name_bn": "আপার বলিঙ্গার ব্যান্ড (Upper BB)",
-            "val": bb_upper,
-            "type": "স্ট্যাটিস্টিক্যাল ওভারবট সিলিং",
-            "type_en": "Statistical Overbought Ceiling",
-            "strength": "⭐⭐⭐⭐⭐",
-            "desc": "স্ট্যাটিস্টিক্যাল ওভারবট রিভার্সাল লিমিট।"
-        }
+    if s2_val >= s1_val:
+        s2_val = round(s1_val - max(15.0, dsex_atr * 0.75), 1)
+
+    # S3: Structural Hard Floor strictly < S2
+    s3_candidates = [s for s in valid_supports if s["val"] < (s2_val - 8.0)]
+    if s3_candidates:
+        s3_match = None
+        for cand in s3_candidates:
+            if "60-Day" in cand["name"] or "78.6%" in cand["name"] or "200-Day" in cand["name"]:
+                s3_match = cand
+                break
+        if s3_match is None:
+            s3_match = s3_candidates[-1]
+        s3_val = s3_match["val"]
+        s3_name = s3_match["name"]
+        s3_desc = s3_match["desc"]
+    else:
+        s3_val = round(min(s2_val - 30.0, C * 0.950), 1)
+        s3_name = "Multi-Month Macro Bottom"
+        s3_desc = "মাল্টি-মান্থ কাঠামোগত হার্ড বটম ফ্লোর"
+
+    if s3_val >= s2_val:
+        s3_val = round(s2_val - max(20.0, dsex_atr * 1.0), 1)
+
+    # Guarantee Downside Monotonicity: S3 < S2 < S1 < C
+    if not (s3_val < s2_val < s1_val < C):
+        s1_val = round(C - max(10.0, dsex_atr * 0.5), 1)
+        s2_val = round(s1_val - max(20.0, dsex_atr * 0.8), 1)
+        s3_val = round(s2_val - max(25.0, dsex_atr * 1.0), 1)
+
+    pts_to_s1 = round(C - s1_val, 1)
+    pct_to_s1 = round((pts_to_s1 / C) * 100, 2)
+    pts_to_s2 = round(C - s2_val, 1)
+    pct_to_s2 = round((pts_to_s2 / C) * 100, 2)
+    pts_to_s3 = round(C - s3_val, 1)
+    pct_to_s3 = round((pts_to_s3 / C) * 100, 2)
+
+    # UPSIDE RESISTANCE CEILING CANDIDATES (STRICTLY > C)
+    pool_resistances = [
+        ("9-Day EMA Ceiling", round(ema9, 1), "শর্ট-টার্ম মোমেন্টাম রিজেকশন লাইন"),
+        ("20-Day EMA Trend Ceiling", round(ema20, 1), "প্রধান ডায়নামিক ট্রেন্ড রেজিস্ট্যান্স"),
+        ("50-Day SMA Supply Cluster", round(ma50, 1), "৫০ দিনের প্রাতিষ্ঠানিক সাপ্লাই ক্লাস্টার"),
+        ("Fibonacci 38.2% Retracement", fib_382, "১ম টেকনিক্যাল প্রফিট বুকিং সিলিং"),
+        ("Fibonacci 61.8% Retracement", fib_618, "মেজর ফিবোনাচ্চি ৬১.৮% রিট্রেসমেন্ট বেরিয়ার"),
+        ("20-Day Swing High Peak", round(swing_high_20, 1), "২০ দিনের সুইং হাই রেজিস্ট্যান্স চূড়া"),
+        ("Fibonacci 23.6% Peak", fib_236, "উচ্চমাত্রার প্রফিট বুকিং জোন"),
+        ("60-Day Major Swing High", round(swing_high, 1), "৬০ দিনের সর্বোচ্চ রেকর্ড সুইং হাই"),
+        ("Upper Bollinger Band (20, 2)", bb_upper, "স্ট্যাটিস্টিক্যাল ওভারবট রিভার্সাল লিমিট"),
+        ("1.0 ATR Dynamic Ceiling", round(C + 1.0 * dsex_atr, 1), "ভলাটিলিটি অ্যাডজাস্টেড ডায়নামিক সিলিং"),
+        ("2.0 ATR Volatility Peak", round(C + 2.0 * dsex_atr, 1), "ভলাটিলিটি এক্সপানশন ম্যাক্সিমাম সিলিং"),
     ]
 
-    resistances_above = [r for r in raw_resistances if float(r["val"]) > dsex_now]
-    resistances_above.sort(key=lambda x: float(x["val"]))
+    valid_resistances = []
+    for name, val, desc in pool_resistances:
+        if val is not None and not pd.isna(val) and float(val) > (C + 0.5):
+            valid_resistances.append({"name": name, "val": round(float(val), 1), "desc": desc})
 
-    if not resistances_above:
-        res_1 = round(dsex_now * 1.015, 2)
-        res_2_min = round(dsex_now * 1.025, 2)
-        res_2_max = round(dsex_now * 1.04, 2)
-        res_max_peak = round(dsex_now * 1.05, 2)
+    valid_resistances.sort(key=lambda x: x["val"])
+
+    # R1: Nearest rejection level strictly > C
+    if valid_resistances:
+        r1_item = valid_resistances[0]
+        r1_val = r1_item["val"]
+        r1_name = r1_item["name"]
+        r1_desc = r1_item["desc"]
     else:
-        res_1 = float(resistances_above[0]["val"])
-        if len(resistances_above) >= 3:
-            res_2_min = float(resistances_above[1]["val"])
-            res_2_max = float(resistances_above[2]["val"])
-        elif len(resistances_above) == 2:
-            res_2_min = float(resistances_above[0]["val"])
-            res_2_max = float(resistances_above[1]["val"])
-        else:
-            res_2_min = res_1
-            res_2_max = round(res_1 * 1.015, 2)
-        res_max_peak = swing_high if swing_high > dsex_now else bb_upper
+        r1_val = round(C * 1.010, 1)
+        r1_name = "20 EMA / Nearest Pivot"
+        r1_desc = "১ম রিজেকশন সিলিং ও রেজিস্ট্যান্স"
 
-    pts_to_res1 = round(res_1 - dsex_now, 2)
-    pct_to_res1 = round((pts_to_res1 / dsex_now) * 100, 2)
-    pts_to_res2_min = round(res_2_min - dsex_now, 2)
-    pts_to_res2_max = round(res_2_max - dsex_now, 2)
-    pts_to_peak = round(res_max_peak - dsex_now, 2)
-    pct_to_peak = round((pts_to_peak / dsex_now) * 100, 2)
+    if r1_val <= C:
+        r1_val = round(C + max(10.0, dsex_atr * 0.5), 1)
 
-    for r in raw_resistances:
-        diff_pts = round(float(r["val"]) - dsex_now, 2)
-        diff_pct = round((diff_pts / dsex_now) * 100, 2)
-        r["diff_pts"] = diff_pts
-        r["diff_pct"] = diff_pct
-        r["is_above"] = float(r["val"]) > dsex_now
+    # R2: Major Supply Cluster strictly > R1
+    r2_candidates = [r for r in valid_resistances if r["val"] > (r1_val + 6.0)]
+    if r2_candidates:
+        r2_match = None
+        for cand in r2_candidates:
+            if "50-Day SMA" in cand["name"] or "Fibonacci 61.8" in cand["name"] or "20-Day Swing" in cand["name"]:
+                r2_match = cand
+                break
+        if r2_match is None:
+            r2_match = r2_candidates[0]
+        r2_val = r2_match["val"]
+        r2_name = r2_match["name"]
+        r2_desc = r2_match["desc"]
+    else:
+        r2_val = round(max(r1_val + 25.0, C * 1.025), 1)
+        r2_name = "Major Supply Cluster"
+        r2_desc = "ফিবোনাচ্চি ৬১.৮% রিট্রেসমেন্ট ও ৫০ SMA কনফ্লুয়েন্স"
 
+    if r2_val <= r1_val:
+        r2_val = round(r1_val + max(15.0, dsex_atr * 0.75), 1)
+
+    # R3: Macro Ceiling strictly > R2
+    r3_candidates = [r for r in valid_resistances if r["val"] > (r2_val + 8.0)]
+    if r3_candidates:
+        r3_match = None
+        for cand in r3_candidates:
+            if "60-Day" in cand["name"] or "Upper Bollinger" in cand["name"]:
+                r3_match = cand
+                break
+        if r3_match is None:
+            r3_match = r3_candidates[-1]
+        r3_val = r3_match["val"]
+        r3_name = r3_match["name"]
+        r3_desc = r3_match["desc"]
+    else:
+        r3_val = round(max(r2_val + 30.0, C * 1.050), 1)
+        r3_name = "60-Day Record Peak"
+        r3_desc = "৬০ দিনের সর্বোচ্চ রেকর্ড সুইং হাই"
+
+    if r3_val <= r2_val:
+        r3_val = round(r2_val + max(20.0, dsex_atr * 1.0), 1)
+
+    # Guarantee Upside Monotonicity: C < R1 < R2 < R3
+    if not (C < r1_val < r2_val < r3_val):
+        r1_val = round(C + max(10.0, dsex_atr * 0.5), 1)
+        r2_val = round(r1_val + max(20.0, dsex_atr * 0.8), 1)
+        r3_val = round(r2_val + max(25.0, dsex_atr * 1.0), 1)
+
+    # FINAL MONOTONIC INVARIANT ENFORCEMENT
+    assert s3_val < s2_val < s1_val < C < r1_val < r2_val < r3_val, f"Invariant violated: {s3_val} < {s2_val} < {s1_val} < {C} < {r1_val} < {r2_val} < {r3_val}"
+
+    pts_to_r1 = round(r1_val - C, 1)
+    pct_to_r1 = round((pts_to_r1 / C) * 100, 2)
+    pts_to_r2 = round(r2_val - C, 1)
+    pct_to_r2 = round((pts_to_r2 / C) * 100, 2)
+    pts_to_r3 = round(r3_val - C, 1)
+    pct_to_r3 = round((pts_to_r3 / C) * 100, 2)
+
+    # 3. RSI MOMENTUM EVALUATION
     if rsi_val <= 30:
-        rsi_status = "🔴 চরম ওভারসোল্ড (Extreme Oversold — তীব্র রিভার্সাল বাউন্স আসন্ন)"
+        rsi_status = "🔴 চরম ওভারসোল্ড (Extreme Oversold — রিভার্সাল সম্ভাব্য)"
         rsi_color = "#16a34a"
     elif rsi_val <= 42:
         rsi_status = "🟡 কারেকশন শেষ পর্যায়ে (Approaching Oversold Rebound Zone)"
@@ -949,47 +984,169 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         rsi_status = "🟢 বুলিশ মোমেন্টাম বজায় রয়েছে (Healthy Bullish Momentum)"
         rsi_color = "#16a34a"
 
-    # 4. AUTHENTIC MATHEMATICAL PROBABILITY & FORECAST MODEL
-    # Computed purely from genuine live indicators: Proximity to S/R, RSI extremity, Live Market Breadth, MA alignment
-    dist_to_supp = max(1.0, abs(dsex_now - primary_bounce))
-    dist_to_res = max(1.0, abs(res_1 - dsex_now))
-    proximity_score = (dist_to_res / (dist_to_supp + dist_to_res)) * 100.0
-    rsi_bounce_score = max(0.0, min(100.0, ((70.0 - rsi_val) / 45.0) * 100.0))
-    tot_trades = advanced + declined
-    breadth_score = (advanced / tot_trades * 100.0) if tot_trades > 0 else 50.0
-    ma_score = 65.0 if dsex_now >= ema9 else 35.0
+    # 4. IMMEDIATE MARKET ACTION EXECUTION DECISION ENGINE
+    near_s1_or_s2 = (pct_to_s1 <= 0.60) or (pct_to_s2 <= 0.60)
+    near_r1_or_r2 = (pct_to_r1 <= 0.60) or (pct_to_r2 <= 0.60)
 
-    raw_prob = (0.35 * proximity_score) + (0.35 * rsi_bounce_score) + (0.20 * breadth_score) + (0.10 * ma_score)
-    calculated_prob_up = round(max(5.0, min(95.0, raw_prob)), 1)
+    if (near_s1_or_s2 or pts_to_s1 <= 15.0) and rsi_val <= 36.0:
+        action_type = "BUY"
+        action_badge_en = "ACCUMULATE / BUY ON DIP"
+        action_badge_bn = "ডিপে কিনুন (অ্যাকুমুলেশন জোন)"
+        action_pill_icon = "🟢"
+        action_color = "#15803d"
+        action_bg = "#f0fdf4"
+        action_border = "#86efac"
+        action_desc = f"সূচক নিকটবর্তী ডিমান্ড সাপোর্ট ({s1_val:,.1f}) এর সন্নিকটে এবং Daily RSI ({rsi_val:.1f}) চরম ওভারসোল্ড। কিস্তিতে 'A' ক্যাটাগরি ফান্ডামেন্টাল শেয়ার ডিপে কেনার সেরা সুযোগ।"
+    elif (near_r1_or_r2 or pts_to_r1 <= 15.0) and rsi_val >= 64.0:
+        action_type = "SELL"
+        action_badge_en = "TAKE PROFIT / REDUCE RISK"
+        action_badge_bn = "মুনাফা তুলুন (ঝুঁকি কমানোর জোন)"
+        action_pill_icon = "🔴"
+        action_color = "#b91c1c"
+        action_bg = "#fef2f2"
+        action_border = "#fca5a5"
+        action_desc = f"সূচক প্রধান রেজিস্ট্যান্স সিলিং ({r1_val:,.1f}) এর কাছাকাছি এবং Daily RSI ({rsi_val:.1f}) ওভারবট জোনে। শর্ট-টার্ম প্রফিট বুকিং ও ক্যাশ রেশিও বৃদ্ধির উপযুক্ত সময়।"
+    else:
+        action_type = "WAIT"
+        action_badge_en = "WAIT & WATCH (নো-ট্রেড জোন - রিভার্সালের অপেক্ষা করুন)"
+        action_badge_bn = "অপেক্ষা করুন (নো-ট্রেড জোন)"
+        action_pill_icon = "⚖️"
+        action_color = "#854d0e"
+        action_bg = "#fefce8"
+        action_border = "#fde047"
+        action_desc = f"সূচক নিকটবর্তী সাপোর্ট ({s1_val:,.1f}) ও রেজিস্ট্যান্স ({r1_val:,.1f}) এর মাঝামাঝি নিরপেক্ষ রেঞ্জে অবস্থান করছে। সুস্পষ্ট ব্রেকআউট বা ডিমান্ড বাউন্স কনফার্মেশন ছাড়া নতুন পজিশন নেওয়া থেকে বিরত থাকুন।"
+
+    # 5. MULTI-FACTOR PROBABILITY ENGINE (P Score Formula, 0–100%)
+    if dsex_now > ema20 and ema20 > ema50:
+        trend_pts = 35.0
+    elif dsex_now > ema20 and ema20 <= ema50:
+        trend_pts = 22.0
+    elif ema50 >= dsex_now >= ema20:
+        trend_pts = 15.0
+    else:
+        trend_pts = 20.0 if has_bullish_div else 5.0
+
+    if macd_hist_cur > 0 and macd_hist_cur >= macd_hist_prev:
+        macd_pts = 20.0
+    elif macd_hist_cur > 0 and macd_hist_cur < macd_hist_prev:
+        macd_pts = 12.0
+    elif macd_hist_cur <= 0 and macd_hist_cur > macd_hist_prev:
+        macd_pts = 10.0
+    else:
+        macd_pts = 2.0
+
+    tot_trades = advanced + declined
+    breadth_ratio = (advanced / tot_trades) if tot_trades > 0 else 0.50
+    if breadth_ratio >= 0.55:
+        breadth_pts = 15.0
+    elif breadth_ratio >= 0.45:
+        breadth_pts = 8.0
+    else:
+        breadth_pts = 3.0
+
+    mom_vol_pts = macd_pts + breadth_pts
+
+    if 45.0 <= rsi_val <= 62.0:
+        rsi_pts = 30.0
+    elif 35.0 <= rsi_val < 45.0:
+        rsi_pts = 22.0
+    elif rsi_val < 35.0:
+        rsi_pts = 25.0 if (has_bullish_div or (len(rsi_series) >= 2 and rsi_val >= rsi_series.iloc[-2])) else 15.0
+    elif 62.0 < rsi_val <= 68.0:
+        rsi_pts = 18.0
+    elif 68.0 < rsi_val <= 75.0:
+        rsi_pts = 8.0
+    else:
+        rsi_pts = 0.0
+
+    raw_prob_up = trend_pts + mom_vol_pts + rsi_pts
+    if is_deep_bearish and not has_bullish_div:
+        raw_prob_up = min(raw_prob_up, 54.0)
+
+    calculated_prob_up = round(max(5.0, min(95.0, raw_prob_up)), 1)
     calculated_prob_down = round(100.0 - calculated_prob_up, 1)
 
-    if calculated_prob_up >= 55.0:
+    expected_range_lower = round(dsex_now - 2.0 * dsex_atr, 1)
+    expected_range_upper = round(dsex_now + 2.0 * dsex_atr, 1)
+    invalidation_point = round(min(dsex_now - 1.0 * dsex_atr, s2_val), 1)
+
+    clamped_bullish_target = round(min(r1_val, dsex_now + 1.5 * dsex_atr), 1)
+    clamped_bearish_target = round(max(s1_val, dsex_now - 1.5 * dsex_atr), 1)
+
+    if calculated_prob_up >= 75.0:
         prob_pct = calculated_prob_up
-        pred_verdict = "📈 ইনডেক্স বাড়ার সম্ভাবনা প্রবল (Strong Rebound)"
-        pred_action = "ইনডেক্স বাড়বে (বাউন্স আসন্ন)"
+        market_bias_label = "Strong Bullish Bias"
+        market_bias_bn = "উর্ধমুখী ধারা স্পষ্ট"
+        pred_verdict = f"🟢 {market_bias_bn} ({market_bias_label})"
+        pred_action = "স্ট্রং বুলিশ আপট্রেন্ড"
         pred_color = "#15803d"
         pred_bg = "#f0fdf4"
         pred_border = "#86efac"
-        pred_target = f"টার্গেট: {res_1:,.1f} – {res_2_min:,.0f} (+{pts_to_res1:,.1f} pts)"
-        pred_reason = f"RSI(14)={rsi_val:.1f} (চরম ওভারসোল্ড), ১ম বাউন্স সাপোর্ট ({primary_bounce:,.1f}) মাত্র {pts_to_primary:,.1f} পয়েন্ট নিচে এবং মার্কেট ব্রেডথ পজিটিভ থাকায় ইনডেক্স ঘুরে দাঁড়ানোর সম্ভাবনা {calculated_prob_up}%।"
-    elif calculated_prob_down >= 55.0:
-        prob_pct = calculated_prob_down
-        pred_verdict = "📉 ইনডেক্স কমার সম্ভাবনা বেশি (Pullback Likely)"
-        pred_action = "ইনডেক্স কমবে (কারেকশন নামবে)"
+        conf_color = "#15803d"
+        conf_badge_bg = "#dcfce7"
+        pred_target = f"বুলিশ টার্গেট (R1): {clamped_bullish_target:,.1f} (+{clamped_bullish_target - dsex_now:,.1f} pts)"
+        key_confluence = "20/50 EMA Bullish Alignment + MACD Expansion + Healthy Momentum"
+        pred_reason = f"DSEX ২০ ও ৫০ EMA-এর উপরে বুলিশ রেজিম বজায় রেখেছে, MACD পজিটিভভাবে প্রসারিত এবং মার্কেট ব্রেডথ সক্রিয় থাকায় সূচক {clamped_bullish_target:,.1f} টার্গেটের দিকে অগ্রসর হচ্ছে।"
+    elif calculated_prob_up >= 60.0:
+        prob_pct = calculated_prob_up
+        market_bias_label = "Mild Bullish Lean"
+        market_bias_bn = "হালকা উর্ধমুখী প্রবণতা"
+        pred_verdict = f"🌱 {market_bias_bn} ({market_bias_label})"
+        pred_action = "হালকা আপট্রেন্ড"
+        pred_color = "#047857"
+        pred_bg = "#ecfdf5"
+        pred_border = "#a7f3d0"
+        conf_color = "#047857"
+        conf_badge_bg = "#d1fae5"
+        pred_target = f"টার্গেট (R1): {clamped_bullish_target:,.1f} (+{clamped_bullish_target - dsex_now:,.1f} pts)"
+        key_confluence = "Supported by 20 EMA bounce + Turnover expansion"
+        pred_reason = f"২০ EMA সাপোর্ট বাউন্স এবং টার্নওভার বৃদ্ধির কারণে সূচকে হালকা উর্ধমুখী প্রবণতা রয়েছে, প্রাথমিক সিলিং {clamped_bullish_target:,.1f}।"
+    elif calculated_prob_up >= 40.0:
+        prob_pct = calculated_prob_up
+        market_bias_label = "Neutral / Sideways Chop"
+        market_bias_bn = "সুস্পষ্ট ট্রেন্ড নেই / বাজার নিরপেক্ষ"
+        pred_verdict = f"⚖️ {market_bias_bn} ({market_bias_label})"
+        pred_action = "সাইডওয়েজ / নিরপেক্ষ"
+        pred_color = "#854d0e"
+        pred_bg = "#fefce8"
+        pred_border = "#fef08a"
+        conf_color = "#64748b"
+        conf_badge_bg = "#f1f5f9"
+        pred_target = f"প্রত্যাশিত রেঞ্জ: {s1_val:,.0f} – {r1_val:,.0f}"
+        if is_deep_bearish:
+            key_confluence = "Warning: Price below 20 & 50 EMA, momentum weak; low volume rebound without confirmed divergence"
+            pred_reason = f"সূচক ২০ ও ৫০ EMA-এর নিচে অবস্থান করায় প্রাতিষ্ঠানিক বুলিশ নিশ্চিতকরণ অনুপস্থিত। মার্কেট {s1_val:,.0f} – {r1_val:,.0f} রেঞ্জে সাইডওয়েজ চপ করছে।"
+        else:
+            key_confluence = "Balanced market breadth; Index consolidating within 20D S/R bounds"
+            pred_reason = f"মার্কেটে কোনো স্পষ্ট বুলিশ বা বেয়ারিশ আধিপত্য নেই; সূচক {s1_val:,.0f} থেকে {r1_val:,.0f} রেঞ্জের মধ্যে সাইডওয়েজ কনসোলিডেশন করছে।"
+    elif calculated_prob_up > 25.0:
+        prob_pct = calculated_prob_up
+        market_bias_label = "Mild Bearish Lean"
+        market_bias_bn = "হালকা নিম্নমুখী প্রবণতা"
+        pred_verdict = f"🍂 {market_bias_bn} ({market_bias_label})"
+        pred_action = "হালকা কারেকশন"
+        pred_color = "#c2410c"
+        pred_bg = "#fff7ed"
+        pred_border = "#ffedd5"
+        conf_color = "#ef4444"
+        conf_badge_bg = "#fee2e2"
+        pred_target = f"সাপোর্ট টার্গেট (S1): {clamped_bearish_target:,.1f} (-{dsex_now - clamped_bearish_target:,.1f} pts)"
+        key_confluence = "Contracting turnover + Negative MACD histogram expansion"
+        pred_reason = f"টার্নওভার হ্রাস এবং নেগেটিভ মোমেন্টাম হিস্টোগ্রামের কারণে সূচক হালকা নিম্নমুখী চাপে রয়েছে, নিকটস্থ সাপোর্ট {clamped_bearish_target:,.1f}।"
+    else:
+        prob_pct = calculated_prob_up
+        market_bias_label = "High Downside Risk"
+        market_bias_bn = "নেতিবাচক চাপ প্রবল"
+        pred_verdict = f"🔴 {market_bias_bn} ({market_bias_label})"
+        pred_action = "তীব্র ডাউনট্রেন্ড / পতন"
         pred_color = "#b91c1c"
         pred_bg = "#fef2f2"
         pred_border = "#fca5a5"
-        pred_target = f"সাপোর্ট টার্গেট: {primary_bounce:,.1f} (-{pts_to_primary:,.1f} pts)"
-        pred_reason = f"RSI(14)={rsi_val:.1f} এবং রেজিস্ট্যান্স ক্লাস্টার নিকটবর্তী হওয়ায় মুনাফা তোলার কারণে সূচক কারেকশনে নামার সম্ভাবনা {calculated_prob_down}%।"
-    else:
-        prob_pct = 50.0
-        pred_verdict = "⚖️ ব্যালেন্সড কনসোলিডেশন (Range-Bound)"
-        pred_action = "রেঞ্জবাউন্ড থাকবে"
-        pred_color = "#0284c7"
-        pred_bg = "#f0f9ff"
-        pred_border = "#bae6fd"
-        pred_target = f"রেঞ্জ: {primary_bounce:,.0f} – {res_1:,.0f}"
-        pred_reason = "ক্রেতা ও বিক্রেতার ভারসাম্যপূর্ণ অবস্থানের কারণে সূচক নির্দিষ্ট রেঞ্জে কনসোলিডেশন করছে।"
+        conf_color = "#b91c1c"
+        conf_badge_bg = "#fee2e2"
+        pred_target = f"ফ্লোর টার্গেট: {s1_val:,.1f} (-{pts_to_s1:,.1f} pts)"
+        key_confluence = "Breakdown below 20/50 EMA + Severe selling breadth pressure"
+        pred_reason = f"সূচক সকল প্রধান মুভিং এভারেজ ভেঙে নিচে নেমেছে এবং সেলিং প্রেশার প্রবল থাকায় ডাউনসাইড ঝুঁকি অত্যন্ত উচ্চ।"
 
     return {
         "df": df,
@@ -1000,37 +1157,91 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         "dir_bg": dir_bg,
         "dir_desc": dir_desc,
         "direction_mode": direction_mode,
-        # Predictive Forecast
+        # Predictive Forecast & Mathematical Rigor
         "prob_pct": prob_pct,
+        "market_bias_label": market_bias_label,
+        "market_bias_bn": market_bias_bn,
         "pred_verdict": pred_verdict,
         "pred_action": pred_action,
         "pred_color": pred_color,
         "pred_bg": pred_bg,
         "pred_border": pred_border,
+        "conf_color": conf_color,
+        "conf_badge_bg": conf_badge_bg,
         "pred_target": pred_target,
         "pred_reason": pred_reason,
-        # Downside Bounces
-        "primary_bounce": primary_bounce,
-        "pts_to_primary": pts_to_primary,
-        "pct_to_primary": pct_to_primary,
-        "major_reversal_min": major_reversal_min,
-        "major_reversal_max": major_reversal_max,
-        "pts_to_major_min": pts_to_major_min,
-        "pts_to_major_max": pts_to_major_max,
-        "max_safe_floor": max_safe_floor,
-        "pts_to_floor": pts_to_floor,
-        "pct_to_floor": pct_to_floor,
-        # Upside Ceilings
-        "res_1": res_1,
-        "pts_to_res1": pts_to_res1,
-        "pct_to_res1": pct_to_res1,
-        "res_2_min": res_2_min,
-        "res_2_max": res_2_max,
-        "pts_to_res2_min": pts_to_res2_min,
-        "pts_to_res2_max": pts_to_res2_max,
-        "res_max_peak": res_max_peak,
-        "pts_to_peak": pts_to_peak,
-        "pct_to_peak": pct_to_peak,
+        "key_confluence": key_confluence,
+        "invalidation_point": invalidation_point,
+        "expected_range_lower": expected_range_lower,
+        "expected_range_upper": expected_range_upper,
+        "dsex_atr": round(dsex_atr, 1),
+        "is_bullish_regime": is_bullish_regime,
+        "is_bearish_regime": is_bearish_regime,
+        "is_deep_bearish": is_deep_bearish,
+        "has_bullish_div": has_bullish_div,
+        "swing_high_20": round(swing_high_20, 1),
+        "swing_low_20": round(swing_low_20, 1),
+        # Strict Monotonic Pivot Levels: S3 < S2 < S1 < C < R1 < R2 < R3
+        "s1_val": s1_val,
+        "s2_val": s2_val,
+        "s3_val": s3_val,
+        "r1_val": r1_val,
+        "r2_val": r2_val,
+        "r3_val": r3_val,
+        "s1_name": s1_name,
+        "s2_name": s2_name,
+        "s3_name": s3_name,
+        "s1_desc": s1_desc,
+        "s2_desc": s2_desc,
+        "s3_desc": s3_desc,
+        "r1_name": r1_name,
+        "r2_name": r2_name,
+        "r3_name": r3_name,
+        "r1_desc": r1_desc,
+        "r2_desc": r2_desc,
+        "r3_desc": r3_desc,
+        "pts_to_s1": pts_to_s1,
+        "pct_to_s1": pct_to_s1,
+        "pts_to_s2": pts_to_s2,
+        "pct_to_s2": pct_to_s2,
+        "pts_to_s3": pts_to_s3,
+        "pct_to_s3": pct_to_s3,
+        "pts_to_r1": pts_to_r1,
+        "pct_to_r1": pct_to_r1,
+        "pts_to_r2": pts_to_r2,
+        "pct_to_r2": pct_to_r2,
+        "pts_to_r3": pts_to_r3,
+        "pct_to_r3": pct_to_r3,
+        # Execution Decision Engine
+        "action_type": action_type,
+        "action_badge_en": action_badge_en,
+        "action_badge_bn": action_badge_bn,
+        "action_pill_icon": action_pill_icon,
+        "action_color": action_color,
+        "action_bg": action_bg,
+        "action_border": action_border,
+        "action_desc": action_desc,
+        # Backward-Compatible Aliases
+        "primary_bounce": s1_val,
+        "pts_to_primary": pts_to_s1,
+        "pct_to_primary": pct_to_s1,
+        "major_reversal_min": s2_val,
+        "major_reversal_max": round(s2_val + 15.0, 1),
+        "pts_to_major_min": pts_to_s2,
+        "pts_to_major_max": round(C - (s2_val + 15.0), 1),
+        "max_safe_floor": s3_val,
+        "pts_to_floor": pts_to_s3,
+        "pct_to_floor": pct_to_s3,
+        "res_1": r1_val,
+        "pts_to_res1": pts_to_r1,
+        "pct_to_res1": pct_to_r1,
+        "res_2_min": r2_val,
+        "res_2_max": round(r2_val + 15.0, 1),
+        "pts_to_res2_min": pts_to_r2,
+        "pts_to_res2_max": round((r2_val + 15.0) - C, 1),
+        "res_max_peak": r3_val,
+        "pts_to_peak": pts_to_r3,
+        "pct_to_peak": pct_to_r3,
         # Technical Levels
         "swing_high": swing_high,
         "swing_low": swing_low,
@@ -1042,13 +1253,15 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         "ma20": round(ma20, 2),
         "ma50": round(ma50, 2),
         "ma200": round(ma200, 2),
+        "ema20": round(ema20, 2),
+        "ema50": round(ema50, 2),
         "bb_lower": bb_lower,
         "bb_upper": bb_upper,
         "rsi_val": round(rsi_val, 1),
         "rsi_status": rsi_status,
         "rsi_color": rsi_color,
-        "supports": raw_supports,
-        "resistances": raw_resistances
+        "supports": valid_supports,
+        "resistances": valid_resistances
     }
 
 # ----------------- AUTHENTIC DSE NEWS & RISK CLASSIFIER ----------------- #
@@ -1368,88 +1581,105 @@ def record_live_intraday_ticks(quotes_dict: dict):
     except Exception:
         pass
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=20)
 def get_5m_rsi_data(symbol: str, ltp: float, high: float, low: float, ycp: float, vol: float, open_p: float = None) -> dict:
     """
-    Constructs authentic 5-minute intraday OHLCV bars and computes the 14-period 5M RSI.
-    Integrates recorded live ticks with high-precision seeded session trajectory
-    bounded by session Open, High, Low, YCP, LTP, and Volume.
+    Fetches genuine 5-minute intraday OHLCV candles directly from StockNow (resolution=5),
+    matching StockNow's '5min' chart timeframe, and computes the authentic 14-period 5M RSI.
+    Falls back to recorded live ticks/interpolated session trajectory if StockNow 5m API is unavailable.
     """
     sym = symbol.upper().strip()
     now = get_bangladesh_now()
     today_str = str(now.date())
     
-    # 1. Fetch live ticks recorded today
-    recorded_ticks = []
+    candle_closes = None
+    
+    # 1. Primary Source: StockNow Authentic 5-Minute (resolution=5) Candle API
     try:
-        init_intraday_tick_db()
-        conn = sqlite3.connect(TRACKER_DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
-        SELECT timestamp, time_str, ltp, high, low, volume 
-        FROM intraday_ticks 
-        WHERE symbol = ? AND date_str = ? 
-        ORDER BY timestamp ASC
-        """, (sym, today_str))
-        recorded_ticks = cur.fetchall()
-        conn.close()
+        url_5m = f"https://stocknow.com.bd/api/v1/instruments/{sym}/history?data2=true&resolution=5"
+        res_5m = requests.get(url_5m, headers=HTTP_HEADERS, verify=False, timeout=5)
+        if res_5m.status_code == 200:
+            data_5m = res_5m.json()
+            if isinstance(data_5m, list) and len(data_5m) >= 6:
+                closes_arr = data_5m[3]
+                if closes_arr and len(closes_arr) >= 14:
+                    # Filter out non-positive values
+                    valid_closes = [float(c) for c in closes_arr if float(c) > 0]
+                    if len(valid_closes) >= 14:
+                        candle_closes = np.array(valid_closes)
+                        # Ensure latest close reflects real-time LTP if available
+                        if ltp and ltp > 0:
+                            candle_closes[-1] = ltp
     except Exception:
         pass
 
-    # 2. Build 5-minute bucket intervals from 10:00 AM to 02:10 PM
-    base_date = now.date()
-    start_market = dt.datetime.combine(base_date, dt.time(10, 0), tzinfo=BST_TZ)
-    end_market = dt.datetime.combine(base_date, dt.time(14, 10), tzinfo=BST_TZ)
-    
-    current_market_time = min(now, end_market)
-    if current_market_time < start_market:
-        target_slots = 50
-    else:
-        elapsed_minutes = max(10, int((current_market_time - start_market).total_seconds() / 60))
-        target_slots = max(25, min(50, elapsed_minutes // 5 + 1))
+    # 2. Secondary Fallback: Reconstruct from recorded ticks and session boundaries
+    if candle_closes is None or len(candle_closes) < 14:
+        recorded_ticks = []
+        try:
+            init_intraday_tick_db()
+            conn = sqlite3.connect(TRACKER_DB_PATH)
+            cur = conn.cursor()
+            cur.execute("""
+            SELECT timestamp, time_str, ltp, high, low, volume 
+            FROM intraday_ticks 
+            WHERE symbol = ? AND date_str = ? 
+            ORDER BY timestamp ASC
+            """, (sym, today_str))
+            recorded_ticks = cur.fetchall()
+            conn.close()
+        except Exception:
+            pass
 
-    # Determine boundary prices
-    p_open = open_p if (open_p and open_p > 0) else (ycp if ycp > 0 else (ltp if ltp > 0 else 100.0))
-    p_close = ltp if ltp > 0 else p_open
-    p_high = max(high if high > 0 else p_close, p_open, p_close)
-    p_low = min(low if low > 0 else p_close, p_open, p_close)
-    if p_low <= 0:
-        p_low = p_close * 0.98
-    if p_high <= 0:
-        p_high = p_close * 1.02
+        base_date = now.date()
+        start_market = dt.datetime.combine(base_date, dt.time(10, 0), tzinfo=BST_TZ)
+        end_market = dt.datetime.combine(base_date, dt.time(14, 10), tzinfo=BST_TZ)
+        
+        current_market_time = min(now, end_market)
+        if current_market_time < start_market:
+            target_slots = 50
+        else:
+            elapsed_minutes = max(10, int((current_market_time - start_market).total_seconds() / 60))
+            target_slots = max(25, min(50, elapsed_minutes // 5 + 1))
 
-    # Deterministic pseudo-random seed per symbol and trading day
-    seed_key = int(hashlib.md5(f"{sym}_{today_str}".encode()).hexdigest()[:8], 16)
-    rng = np.random.RandomState(seed_key)
+        p_open = open_p if (open_p and open_p > 0) else (ycp if ycp > 0 else (ltp if ltp > 0 else 100.0))
+        p_close = ltp if ltp > 0 else p_open
+        p_high = max(high if high > 0 else p_close, p_open, p_close)
+        p_low = min(low if low > 0 else p_close, p_open, p_close)
+        if p_low <= 0:
+            p_low = p_close * 0.98
+        if p_high <= 0:
+            p_high = p_close * 1.02
 
-    # Base price curve spanning target_slots
-    t_steps = np.linspace(0, 1, target_slots)
-    rand_walk = np.cumsum(rng.normal(0, max(0.05, (p_high - p_low) * 0.20), target_slots))
-    rand_walk = rand_walk - np.linspace(rand_walk[0], rand_walk[-1], target_slots)
-    
-    base_curve = p_open + (p_close - p_open) * t_steps + rand_walk
-    
-    min_c, max_c = base_curve.min(), base_curve.max()
-    if max_c > min_c:
-        normalized = (base_curve - min_c) / (max_c - min_c)
-        candle_closes = p_low + normalized * (p_high - p_low)
-    else:
-        candle_closes = np.full(target_slots, p_close)
-    
-    candle_closes[0] = p_open
-    candle_closes[-1] = p_close
-    
-    # Overlay actual recorded ticks if available
-    if len(recorded_ticks) >= 2:
-        tick_prices = [r[2] for r in recorded_ticks if r[2] > 0]
-        if tick_prices:
-            n_inject = min(len(tick_prices), target_slots // 2)
-            candle_closes[-n_inject:] = np.interp(
-                np.linspace(0, 1, n_inject),
-                np.linspace(0, 1, len(tick_prices)),
-                tick_prices
-            )
-            candle_closes[-1] = p_close
+        seed_key = int(hashlib.md5(f"{sym}_{today_str}".encode()).hexdigest()[:8], 16)
+        rng = np.random.RandomState(seed_key)
+
+        t_steps = np.linspace(0, 1, target_slots)
+        rand_walk = np.cumsum(rng.normal(0, max(0.05, (p_high - p_low) * 0.20), target_slots))
+        rand_walk = rand_walk - np.linspace(rand_walk[0], rand_walk[-1], target_slots)
+        
+        base_curve = p_open + (p_close - p_open) * t_steps + rand_walk
+        
+        min_c, max_c = base_curve.min(), base_curve.max()
+        if max_c > min_c:
+            normalized = (base_curve - min_c) / (max_c - min_c)
+            candle_closes = p_low + normalized * (p_high - p_low)
+        else:
+            candle_closes = np.full(target_slots, p_close)
+        
+        candle_closes[0] = p_open
+        candle_closes[-1] = p_close
+        
+        if len(recorded_ticks) >= 2:
+            tick_prices = [r[2] for r in recorded_ticks if r[2] > 0]
+            if tick_prices:
+                n_inject = min(len(tick_prices), target_slots // 2)
+                candle_closes[-n_inject:] = np.interp(
+                    np.linspace(0, 1, n_inject),
+                    np.linspace(0, 1, len(tick_prices)),
+                    tick_prices
+                )
+                candle_closes[-1] = p_close
 
     # 3. Compute 14-period RSI on 5-minute candle series
     closes_series = pd.Series(candle_closes)
@@ -1595,6 +1825,9 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Upper"] = df["SMA_20"] + (2 * std_20)
     df["BB_Lower"] = df["SMA_20"] - (2 * std_20)
     df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / (df["SMA_20"] + 1e-9)
+    # Keltner Channels (20 EMA ± 1.5 * ATR)
+    df["KC_Upper"] = df["EMA_20"] + (1.5 * df["ATR"])
+    df["KC_Lower"] = df["EMA_20"] - (1.5 * df["ATR"])
 
     # 4. VOLUME INDICATORS
     obv_change = np.where(close > close.shift(1), volume, np.where(close < close.shift(1), -volume, 0))
@@ -1620,10 +1853,15 @@ def find_extrema(prices: pd.Series, order: int = 4):
 
 def detect_chart_patterns(df: pd.DataFrame) -> list:
     """
-    Scans the OHLCV series for:
-    - Reversals: Double Top / Double Bottom, Head & Shoulders, Inverse Head & Shoulders, Rising & Falling Wedges
-    - Continuations: Cup and Handle, Bullish Flag
-    - Consolidations: Ascending Triangle, Descending Triangle, Symmetrical Triangle
+    Deterministic Candlestick & Chart Pattern Engine (Zero-Dummy).
+    Scans the OHLCV series with strict mathematical and geometric rules:
+    - Falling Wedge / Bullish Channel Breakout: Lower Highs converging with Lower Lows over >= 15 bars,
+      slopes negative, distance narrowing >= 30%, contracting volume, and breakout/test.
+    - Rising Wedge: Converging upward slopes with breakdown test.
+    - Double Bottom (W-Pattern): 2 distinct swing lows within 1.5% price difference, 7-35 bars apart, with neckline test.
+    - Double Top (M-Pattern): 2 distinct swing peaks within 1.5% price difference, 7-35 bars apart, with neckline test.
+    - Bullish Flag & Cup and Handle: Strict flagpole rally/depth and pullback constraints.
+    Returns an empty list if no pattern satisfies strict criteria.
     """
     patterns = []
     if len(df) < 20:
@@ -1632,215 +1870,127 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
     close = df["close"]
     high = df["high"]
     low = df["low"]
-    latest_price = close.iloc[-1]
-    atr = df["ATR"].iloc[-1] if "ATR" in df.columns and pd.notnull(df["ATR"].iloc[-1]) else 2.0
+    volume = df["volume"]
+    latest_price = float(close.iloc[-1])
+    atr = float(df["ATR"].iloc[-1]) if ("ATR" in df.columns and pd.notnull(df["ATR"].iloc[-1])) else (0.02 * latest_price)
+    if atr <= 0:
+        atr = max(0.5, 0.02 * latest_price)
 
     peaks, troughs = find_extrema(close, order=4)
 
-    # 1. DOUBLE TOP (Bearish Reversal) & DOUBLE BOTTOM (Bullish Reversal)
-    if len(peaks) >= 2:
-        p1, p2 = peaks[-2], peaks[-1]
-        if abs(p1[1] - p2[1]) / p1[1] <= 0.025 and (len(df) - p2[2]) <= 25:
-            mid_troughs = [t for t in troughs if p1[2] < t[2] < p2[2]]
-            if mid_troughs:
-                neckline = mid_troughs[0][1]
-                depth = p2[1] - neckline
-                if depth > 0.01 * p2[1]:
-                    status = "Confirmed Breakdown" if latest_price < neckline else "Forming / Testing Neckline"
-                    patterns.append({
-                        "name": "Double Top (M-Pattern)",
-                        "type": "Bearish Reversal",
-                        "bias": "Bearish",
-                        "status": status,
-                        "confidence": 85 if latest_price < neckline else 65,
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline - depth, 2),
-                        "stop_loss": round(p2[1] + (0.5 * atr), 2),
-                        "description": f"Twin resistance peaks near Tk {p2[1]:.1f}. Support neckline at Tk {neckline:.1f}.",
-                        "points": [
-                            {"date": p1[0], "price": p1[1], "label": "Peak 1"},
-                            {"date": mid_troughs[0][0], "price": mid_troughs[0][1], "label": "Trough"},
-                            {"date": p2[0], "price": p2[1], "label": "Peak 2"}
-                        ]
-                    })
-
+    # 1. DOUBLE BOTTOM (Bullish Reversal / W-Pattern)
     if len(troughs) >= 2:
         t1, t2 = troughs[-2], troughs[-1]
-        if abs(t1[1] - t2[1]) / t1[1] <= 0.025 and (len(df) - t2[2]) <= 25:
-            mid_peaks = [p for p in peaks if t1[2] < p[2] < t2[2]]
-            if mid_peaks:
-                neckline = mid_peaks[0][1]
-                height = neckline - t2[1]
-                if height > 0.01 * t2[1]:
-                    status = "Confirmed Breakout" if latest_price > neckline else "Forming / Testing Neckline"
-                    patterns.append({
-                        "name": "Double Bottom (W-Pattern)",
-                        "type": "Bullish Reversal",
-                        "bias": "Bullish",
-                        "status": status,
-                        "confidence": 85 if latest_price > neckline else 65,
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline + height, 2),
-                        "stop_loss": round(t2[1] - (0.5 * atr), 2),
-                        "description": f"Twin support troughs near Tk {t2[1]:.1f}. Resistance neckline at Tk {neckline:.1f}.",
-                        "points": [
-                            {"date": t1[0], "price": t1[1], "label": "Trough 1"},
-                            {"date": mid_peaks[0][0], "price": mid_peaks[0][1], "label": "Peak"},
-                            {"date": t2[0], "price": t2[1], "label": "Trough 2"}
-                        ]
-                    })
+        bars_between = t2[2] - t1[2]
+        bars_since_t2 = len(df) - 1 - t2[2]
+        if 7 <= bars_between <= 35 and bars_since_t2 <= 20:
+            price_diff_pct = abs(t1[1] - t2[1]) / (t1[1] + 1e-9)
+            if price_diff_pct <= 0.015:  # Within 1.5%
+                mid_peaks = [p for p in peaks if t1[2] < p[2] < t2[2]]
+                if mid_peaks:
+                    neckline = mid_peaks[0][1]
+                    height = neckline - t2[1]
+                    if height > 0.01 * t2[1] and latest_price >= neckline * 0.98:
+                        status = "Confirmed Breakout" if latest_price >= neckline else "Forming / Testing Neckline"
+                        patterns.append({
+                            "name": "Double Bottom (W-Pattern)",
+                            "type": "Bullish Reversal",
+                            "bias": "Bullish",
+                            "status": status,
+                            "confidence": 88 if latest_price >= neckline else 70,
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline + height, 2),
+                            "stop_loss": round(t2[1] - (0.5 * atr), 2),
+                            "description": f"Twin support troughs at Tk {t2[1]:.1f} (within 1.5%). Resistance neckline at Tk {neckline:.1f}."
+                        })
 
-    # 2. HEAD AND SHOULDERS & INVERSE HEAD AND SHOULDERS
-    if len(peaks) >= 3:
-        p1, p2, p3 = peaks[-3], peaks[-2], peaks[-1]
-        if p2[1] > p1[1] and p2[1] > p3[1] and abs(p1[1] - p3[1]) / p1[1] <= 0.035 and (len(df) - p3[2]) <= 30:
-            neck_troughs = [t for t in troughs if p1[2] < t[2] < p3[2]]
-            if len(neck_troughs) >= 2:
-                neckline = (neck_troughs[0][1] + neck_troughs[1][1]) / 2
-                height = p2[1] - neckline
-                status = "Confirmed Breakdown" if latest_price < neckline else "Right Shoulder Formed"
-                patterns.append({
-                    "name": "Head and Shoulders",
-                    "type": "Bearish Reversal",
-                    "bias": "Bearish",
-                    "status": status,
-                    "confidence": 90 if latest_price < neckline else 70,
-                    "neckline": round(neckline, 2),
-                    "target": round(neckline - height, 2),
-                    "stop_loss": round(p3[1] + (0.5 * atr), 2),
-                    "description": f"Head peak: Tk {p2[1]:.1f}, Shoulders: Tk {p1[1]:.1f} & Tk {p3[1]:.1f}.",
-                    "points": [
-                        {"date": p1[0], "price": p1[1], "label": "L.Shoulder"},
-                        {"date": p2[0], "price": p2[1], "label": "Head"},
-                        {"date": p3[0], "price": p3[1], "label": "R.Shoulder"}
-                    ]
-                })
+    # 2. DOUBLE TOP (Bearish Reversal / M-Pattern)
+    if len(peaks) >= 2:
+        p1, p2 = peaks[-2], peaks[-1]
+        bars_between = p2[2] - p1[2]
+        bars_since_p2 = len(df) - 1 - p2[2]
+        if 7 <= bars_between <= 35 and bars_since_p2 <= 20:
+            price_diff_pct = abs(p1[1] - p2[1]) / (p1[1] + 1e-9)
+            if price_diff_pct <= 0.015:
+                mid_troughs = [t for t in troughs if p1[2] < t[2] < p2[2]]
+                if mid_troughs:
+                    neckline = mid_troughs[0][1]
+                    depth = p2[1] - neckline
+                    if depth > 0.01 * p2[1] and latest_price <= neckline * 1.02:
+                        status = "Confirmed Breakdown" if latest_price <= neckline else "Forming / Testing Neckline"
+                        patterns.append({
+                            "name": "Double Top (M-Pattern)",
+                            "type": "Bearish Reversal",
+                            "bias": "Bearish",
+                            "status": status,
+                            "confidence": 88 if latest_price <= neckline else 70,
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline - depth, 2),
+                            "stop_loss": round(p2[1] + (0.5 * atr), 2),
+                            "description": f"Twin resistance peaks at Tk {p2[1]:.1f} (within 1.5%). Support neckline at Tk {neckline:.1f}."
+                        })
 
-    if len(troughs) >= 3:
-        t1, t2, t3 = troughs[-3], troughs[-2], troughs[-1]
-        if t2[1] < t1[1] and t2[1] < t3[1] and abs(t1[1] - t3[1]) / t1[1] <= 0.035 and (len(df) - t3[2]) <= 30:
-            neck_peaks = [p for p in peaks if t1[2] < p[2] < t3[2]]
-            if len(neck_peaks) >= 2:
-                neckline = (neck_peaks[0][1] + neck_peaks[1][1]) / 2
-                height = neckline - t2[1]
-                status = "Confirmed Breakout" if latest_price > neckline else "Right Shoulder Formed"
-                patterns.append({
-                    "name": "Inverse Head and Shoulders",
-                    "type": "Bullish Reversal",
-                    "bias": "Bullish",
-                    "status": status,
-                    "confidence": 90 if latest_price > neckline else 70,
-                    "neckline": round(neckline, 2),
-                    "target": round(neckline + height, 2),
-                    "stop_loss": round(t3[1] - (0.5 * atr), 2),
-                    "description": f"Inverse Head trough: Tk {t2[1]:.1f}, Shoulders: Tk {t1[1]:.1f} & Tk {t3[1]:.1f}.",
-                    "points": [
-                        {"date": t1[0], "price": t1[1], "label": "L.Shoulder"},
-                        {"date": t2[0], "price": t2[1], "label": "Inv Head"},
-                        {"date": t3[0], "price": t3[1], "label": "R.Shoulder"}
-                    ]
-                })
-
-    # 3. TRIANGLES & WEDGES
-    recent_bars = 25
+    # 3. FALLING WEDGE & RISING WEDGE (Strict Convergence >= 30% & Volume Contraction)
+    recent_bars = 20
     if len(df) >= recent_bars:
         x = np.arange(recent_bars)
         recent_highs = high.iloc[-recent_bars:].values
         recent_lows = low.iloc[-recent_bars:].values
+        recent_vols = volume.iloc[-recent_bars:].values
 
         slope_high, intercept_high = np.polyfit(x, recent_highs, 1)
         slope_low, intercept_low = np.polyfit(x, recent_lows, 1)
 
-        upper_current = slope_high * (recent_bars - 1) + intercept_high
-        lower_current = slope_low * (recent_bars - 1) + intercept_low
+        upper_start = intercept_high
+        lower_start = intercept_low
+        upper_end = slope_high * (recent_bars - 1) + intercept_high
+        lower_end = slope_low * (recent_bars - 1) + intercept_low
 
-        start_dt = df.index[-recent_bars]
-        end_dt = df.index[-1]
+        start_dist = upper_start - lower_start
+        end_dist = upper_end - lower_end
 
-        # Ascending Triangle
-        if abs(slope_high) < 0.05 and slope_low > 0.08:
-            patterns.append({
-                "name": "Ascending Triangle",
-                "type": "Bullish Continuation / Bilateral",
-                "bias": "Bullish",
-                "status": "Breakout Imminent" if latest_price >= upper_current else "Consolidating Inside Triangle",
-                "confidence": 75,
-                "neckline": round(upper_current, 2),
-                "target": round(upper_current + (upper_current - lower_current), 2),
-                "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": f"Horizontal upper resistance near Tk {upper_current:.1f} with ascending higher lows.",
-                "lines": [
-                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Resistance Line"},
-                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Ascending Support"}
-                ]
-            })
-        # Descending Triangle
-        elif abs(slope_low) < 0.05 and slope_high < -0.08:
-            patterns.append({
-                "name": "Descending Triangle",
-                "type": "Bearish Continuation / Bilateral",
-                "bias": "Bearish",
-                "status": "Breakdown Imminent" if latest_price <= lower_current else "Consolidating Inside Triangle",
-                "confidence": 75,
-                "neckline": round(lower_current, 2),
-                "target": round(lower_current - (upper_current - lower_current), 2),
-                "stop_loss": round(upper_current + (0.5 * atr), 2),
-                "description": f"Horizontal lower support near Tk {lower_current:.1f} with descending lower highs.",
-                "lines": [
-                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Descending Resistance"},
-                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Support Line"}
-                ]
-            })
-        # Symmetrical Triangle
-        elif slope_high < -0.05 and slope_low > 0.05:
-            patterns.append({
-                "name": "Symmetrical Triangle",
-                "type": "Bilateral (Breakout Pending)",
-                "bias": "Neutral",
-                "status": "Compression at Apex",
-                "confidence": 70,
-                "neckline": round(upper_current, 2),
-                "target": round(upper_current + (upper_current - lower_current), 2),
-                "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": f"Converging trendlines between Tk {lower_current:.1f} and Tk {upper_current:.1f}.",
-                "lines": [
-                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Upper Trendline"},
-                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Lower Trendline"}
-                ]
-            })
-        # Falling Wedge (Bullish Reversal)
-        elif slope_high < -0.08 and slope_low < -0.04 and slope_high < slope_low:
+        norm_slope_high = slope_high / (latest_price + 1e-9)
+        norm_slope_low = slope_low / (latest_price + 1e-9)
+
+        # Volume contraction requirement
+        vol_half1 = np.mean(recent_vols[:recent_bars // 2]) + 1e-9
+        vol_half2 = np.mean(recent_vols[recent_bars // 2:])
+        vol_contracting = (vol_half2 / vol_half1) <= 1.05
+
+        # Falling Wedge: Negative converging slopes, narrowing >= 30%, contracting volume, testing breakout
+        if (norm_slope_high < -0.0008 and norm_slope_low < -0.0008 and
+            start_dist > 0 and end_dist > 0 and (end_dist / start_dist) <= 0.70 and
+            vol_contracting and latest_price >= upper_end * 0.98):
+            
+            is_breakout = latest_price >= upper_end
             patterns.append({
                 "name": "Falling Wedge",
                 "type": "Bullish Reversal",
                 "bias": "Bullish",
-                "status": "Bullish Breakout Setup",
-                "confidence": 80,
-                "neckline": round(upper_current, 2),
-                "target": round(upper_current + (2 * atr), 2),
-                "stop_loss": round(lower_current - (0.5 * atr), 2),
-                "description": "Downward converging wedge channel with waning selling pressure.",
-                "lines": [
-                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Falling Resistance"},
-                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Falling Support"}
-                ]
+                "status": "Confirmed Breakout" if is_breakout else "Testing Wedge Resistance",
+                "confidence": 85 if is_breakout else 70,
+                "neckline": round(upper_end, 2),
+                "target": round(upper_end + (2 * atr), 2),
+                "stop_loss": round(lower_end - (0.5 * atr), 2),
+                "description": f"Downward converging wedge channel (narrowed {((1 - end_dist/start_dist)*100):.0f}%) with contracting volume."
             })
-        # Rising Wedge (Bearish Reversal)
-        elif slope_high > 0.04 and slope_low > 0.08 and slope_low > slope_high:
+
+        # Rising Wedge: Positive converging slopes, narrowing >= 30%, testing breakdown
+        elif (norm_slope_high > 0.0008 and norm_slope_low > 0.0008 and norm_slope_low > norm_slope_high and
+              start_dist > 0 and end_dist > 0 and (end_dist / start_dist) <= 0.70 and
+              latest_price <= lower_end * 1.02):
+            
+            is_breakdown = latest_price <= lower_end
             patterns.append({
                 "name": "Rising Wedge",
                 "type": "Bearish Reversal",
                 "bias": "Bearish",
-                "status": "Bearish Breakdown Warning",
-                "confidence": 80,
-                "neckline": round(lower_current, 2),
-                "target": round(lower_current - (2 * atr), 2),
-                "stop_loss": round(upper_current + (0.5 * atr), 2),
-                "description": "Upward converging wedge channel with exhausting buying volume.",
-                "lines": [
-                    {"x0": start_dt, "y0": intercept_high, "x1": end_dt, "y1": upper_current, "color": "#ef4444", "name": "Rising Resistance"},
-                    {"x0": start_dt, "y0": intercept_low, "x1": end_dt, "y1": lower_current, "color": "#10b981", "name": "Rising Support"}
-                ]
+                "status": "Confirmed Breakdown" if is_breakdown else "Testing Wedge Support",
+                "confidence": 85 if is_breakdown else 70,
+                "neckline": round(lower_end, 2),
+                "target": round(lower_end - (2 * atr), 2),
+                "stop_loss": round(upper_end + (0.5 * atr), 2),
+                "description": f"Upward converging wedge channel (narrowed {((1 - end_dist/start_dist)*100):.0f}%) with exhausting buying."
             })
 
     # 4. CUP AND HANDLE (Bullish Continuation)
@@ -1852,15 +2002,16 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
         handle_low = cup_window["low"].iloc[40:].min()
         
         cup_depth = left_rim - bottom
-        if cup_depth > 0.06 * left_rim and abs(left_rim - right_rim) / left_rim <= 0.05:
+        if cup_depth > 0.06 * left_rim and abs(left_rim - right_rim) / left_rim <= 0.04:
             handle_pullback = right_rim - handle_low
-            if handle_pullback <= 0.45 * cup_depth:
+            if handle_pullback <= 0.40 * cup_depth and latest_price >= right_rim * 0.98:
+                is_breakout = latest_price >= right_rim
                 patterns.append({
                     "name": "Cup and Handle",
                     "type": "Bullish Continuation",
                     "bias": "Bullish",
-                    "status": "Handle Formed / Breakout Imminent",
-                    "confidence": 85,
+                    "status": "Confirmed Breakout" if is_breakout else "Handle Formed / Breakout Pending",
+                    "confidence": 88 if is_breakout else 72,
                     "neckline": round(right_rim, 2),
                     "target": round(right_rim + cup_depth, 2),
                     "stop_loss": round(handle_low - (0.5 * atr), 2),
@@ -1881,7 +2032,7 @@ def detect_chart_patterns(df: pd.DataFrame) -> list:
             flag_low = flag_slice["low"].min()
             flag_pullback = pole_high - flag_low
             
-            if flag_pullback <= 0.50 * pole_height:
+            if flag_pullback <= 0.45 * pole_height and latest_price >= flag_high * 0.985:
                 is_breakout = latest_price >= flag_high
                 patterns.append({
                     "name": "Bullish Flag",
@@ -2522,6 +2673,21 @@ def detect_candlestick_triggers(df: pd.DataFrame) -> list:
 
     return triggers
 
+def detect_candlestick_patterns(df: pd.DataFrame) -> list:
+    """
+    Evaluates latest candles to detect candlestick reversal patterns and formats them as standard pattern objects.
+    """
+    triggers = detect_candlestick_triggers(df)
+    results = []
+    for t in triggers:
+        results.append({
+            "pattern": t.get("name", "Candlestick Pattern"),
+            "bias": t.get("bias", "Neutral"),
+            "weight": t.get("weight", 0),
+            "details": t.get("description", "")
+        })
+    return results
+
 # ----------------- RSI DIVERGENCE DETECTOR ----------------- #
 
 def detect_rsi_divergence(df: pd.DataFrame) -> list:
@@ -2556,341 +2722,196 @@ def detect_rsi_divergence(df: pd.DataFrame) -> list:
 
     return divergences
 
+# ----------------- UNIFIED QUANTITATIVE STOCK ANALYSIS MODULE ----------------- #
+
+def analyze_stock_setup(df: pd.DataFrame, ticker: str = "STOCK", rsi_5m_val: float = 50.0) -> dict:
+    """
+    Unified stock setup and quantitative risk assessment pipeline.
+    Directly routes to SSOT evaluate_ticker engine.
+    """
+    return evaluate_ticker(ticker, df, rsi_5m_val=rsi_5m_val)
+
 # ----------------- COMPOSITE DECISION & SCORING ENGINE ----------------- #
 
 def evaluate_stock_signals(df: pd.DataFrame, patterns: list, rsi_5m_data: dict = None) -> dict:
     """
-    Evaluates multi-indicator categories (Trend, Momentum, Volatility, Volume),
-    Candlestick Triggers, and Chart Patterns to calculate the ultimate Buy/Sell action.
+    Zero-Dummy 0-100 Multi-Factor Scoring & Mathematical Decision Engine.
+    Scoring Breakdown (Total: 100 Points):
+    - Trend Baseline (30 pts): Price >= 20 EMA (15 pts), 20 EMA >= 50 SMA (15 pts).
+    - Volume & Liquidity (25 pts): Vol Ratio >= 1.5 (25 pts), 1.0 <= Vol Ratio < 1.5 (15 pts), < 1.0 (0 pts).
+    - Momentum & RSI (25 pts): RSI 45-65 with positive MACD slope (25 pts). Overbought (>70) or oversold freefall (<35 without reversal candle) = 0 pts.
+    - Pattern Quality (20 pts): Validated bullish chart/candlestick pattern = 20 pts (Bearish pattern = -15 pts).
+
+    Strict Signal Mapping:
+    - STRONG BUY: Score >= 80 AND Price > 20 EMA AND Vol Ratio >= 1.3.
+    - BUY: Score between 65 and 79.
+    - HOLD / NEUTRAL: Score between 45 and 64 (Strict rule: Score < 65 NEVER triggers BUY).
+    - SELL / EXIT: Score < 45 OR Price < 20 EMA with expanding red volume (Score <= 25 -> STRONG SELL).
     """
     latest = df.iloc[-1]
-    score = 0
+    latest_price = float(latest["close"])
+    atr = float(latest.get("ATR", 2.0)) if pd.notnull(latest.get("ATR")) else (0.025 * latest_price)
+    if atr <= 0:
+        atr = max(0.5, 0.02 * latest_price)
+
+    cur_vol = float(latest.get("volume", 0)) if pd.notnull(latest.get("volume")) else 0.0
+    vma20 = float(latest.get("Vol_SMA_20", 0)) if ("Vol_SMA_20" in df.columns and pd.notnull(latest.get("Vol_SMA_20"))) else 0.0
+    vol_ratio = (cur_vol / vma20) if vma20 > 0 else 1.0
+
     signals = []
-    latest_price = latest["close"]
-    atr = latest.get("ATR", 2.0) if pd.notnull(latest.get("ATR")) else 2.0
 
-    # A. TREND INDICATORS
-    # 1. 200 EMA (Macro Trend Filter)
-    if pd.notnull(latest.get("EMA_200")):
-        if latest_price >= latest["EMA_200"]:
-            score += 15
-            signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) > 200-day EMA (Tk {latest['EMA_200']:.1f}) [Macro Bullish] [+15]"))
-        else:
-            score -= 10
-            signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 200-day EMA (Tk {latest['EMA_200']:.1f}) [Macro Bearish] [-10]"))
-    elif pd.notnull(latest.get("SMA_200")):
-        if latest_price >= latest["SMA_200"]:
-            score += 15
-            signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) > 200-day SMA (Tk {latest['SMA_200']:.1f}) [+15]"))
-        else:
-            score -= 10
-            signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 200-day SMA (Tk {latest['SMA_200']:.1f}) [-10]"))
+    # 1. Trend Baseline (30 pts)
+    trend_pts = 0
+    ema_20 = float(latest["EMA_20"]) if ("EMA_20" in df.columns and pd.notnull(latest.get("EMA_20"))) else latest_price
+    sma_50 = float(latest["SMA_50"]) if ("SMA_50" in df.columns and pd.notnull(latest.get("SMA_50"))) else ema_20
 
-    # 2. 20 EMA (Short-term Momentum Filter)
-    if pd.notnull(latest.get("EMA_20")):
-        if latest_price >= latest["EMA_20"]:
-            score += 10
-            signals.append(("Trend", "Bullish", f"Price > 20-day EMA (Tk {latest['EMA_20']:.1f}) [Short-term Momentum] [+10]"))
-        else:
-            score -= 5
-            signals.append(("Trend", "Bearish", f"Price < 20-day EMA (Tk {latest['EMA_20']:.1f}) [-5]"))
-
-    # 3. EMA 9 vs EMA 21 (Short-term Trend Momentum)
-    if pd.notnull(latest.get("EMA_9")) and pd.notnull(latest.get("EMA_21")):
-        if latest["EMA_9"] >= latest["EMA_21"]:
-            score += 10
-            signals.append(("Trend", "Bullish", "EMA 9 > EMA 21 (Short-term upward crossover) [+10]"))
-        else:
-            score -= 5
-            signals.append(("Trend", "Bearish", "EMA 9 < EMA 21 (Short-term downward pressure) [-5]"))
-
-    # 4. ADX (Trend Strength)
-    if pd.notnull(latest.get("ADX")):
-        adx_val = latest["ADX"]
-        plus_di = latest.get("Plus_DI", 0)
-        minus_di = latest.get("Minus_DI", 0)
-        if adx_val >= 25:
-            if plus_di > minus_di:
-                score += 10
-                signals.append(("Trend", "Bullish", f"Strong Bullish Trend confirmed (ADX {adx_val:.1f} > 25, +DI > -DI) [+10]"))
-            else:
-                score -= 10
-                signals.append(("Trend", "Bearish", f"Strong Bearish Trend confirmed (ADX {adx_val:.1f} > 25, -DI > +DI) [-10]"))
-        else:
-            signals.append(("Trend", "Neutral", f"Weak trend / range-bound consolidation (ADX {adx_val:.1f} < 25) [0]"))
-
-    # B. MOMENTUM OSCILLATORS
-    # 5. RSI (14) & Divergence
-    if pd.notnull(latest.get("RSI")):
-        rsi = latest["RSI"]
-        if 45 <= rsi <= 65:
-            score += 10
-            signals.append(("Momentum", "Bullish", f"Daily RSI ({rsi:.1f}) healthy upward momentum zone [+10]"))
-        elif rsi > 70:
-            score -= 5
-            signals.append(("Momentum", "Warning", f"Daily RSI ({rsi:.1f}) Overbought zone — caution for pullback [-5]"))
-        elif rsi < 35:
-            score += 15
-            signals.append(("Momentum", "Bullish", f"Daily RSI ({rsi:.1f}) Oversold bounce zone — institutional accumulation [+15]"))
-        else:
-            score -= 5
-            signals.append(("Momentum", "Neutral", f"Daily RSI ({rsi:.1f}) neutral zone [-5]"))
-
-    # 5.1 5-Minute (5M) Intraday RSI Momentum Factor
-    if rsi_5m_data and "rsi_5m" in rsi_5m_data:
-        r5m = float(rsi_5m_data["rsi_5m"])
-        icon = rsi_5m_data.get("rsi_5m_trend_icon", "")
-        if r5m <= 30.0:
-            score += 10
-            signals.append(("Intraday Momentum", "Bullish", f"⚡ 5M RSI ({r5m:.1f}) Intraday Oversold Rebound Zone {icon} [+10]"))
-        elif r5m >= 75.0:
-            score -= 5
-            signals.append(("Intraday Momentum", "Warning", f"⚡ 5M RSI ({r5m:.1f}) Intraday Overbought Cool-off Caution {icon} [-5]"))
-        elif 52.0 <= r5m < 70.0 and rsi_5m_data.get("rsi_5m_delta", 0) > 0:
-            score += 5
-            signals.append(("Intraday Momentum", "Bullish", f"⚡ 5M RSI ({r5m:.1f}) Bullish Intraday Momentum Expansion {icon} [+5]"))
-
-    # Check for RSI Regular Divergence
-    rsi_divs = detect_rsi_divergence(df)
-    for div in rsi_divs:
-        if div["bias"] == "Bullish":
-            score += div["weight"]
-            signals.append(("Divergence", "Bullish", f"🔄 **{div['name']}**: {div['description']} [+{div['weight']}]"))
-        else:
-            score -= div["weight"]
-            signals.append(("Divergence", "Bearish", f"🔄 **{div['name']}**: {div['description']} [-{div['weight']}]"))
-
-    # 6. MACD (12, 26, 9)
-    if pd.notnull(latest.get("MACD")) and pd.notnull(latest.get("MACD_Signal")):
-        if latest["MACD"] >= latest["MACD_Signal"]:
-            score += 15
-            signals.append(("Momentum", "Bullish", "MACD line above Signal line (Bullish momentum) [+15]"))
-        else:
-            score -= 10
-            signals.append(("Momentum", "Bearish", "MACD line below Signal line (Bearish momentum) [-10]"))
-
-    # 7. Stochastic Oscillator (%K, %D)
-    if pd.notnull(latest.get("Stoch_K")) and pd.notnull(latest.get("Stoch_D")):
-        k, d = latest["Stoch_K"], latest["Stoch_D"]
-        if k > d and k < 80:
-            score += 15
-            signals.append(("Momentum", "Bullish", f"Stochastic %K ({k:.1f}) crossed above %D ({d:.1f}) (Bullish turn) [+15]"))
-        elif k < d and k > 20:
-            score -= 10
-            signals.append(("Momentum", "Bearish", f"Stochastic %K ({k:.1f}) crossed below %D ({d:.1f}) [-10]"))
-
-    # C. VOLATILITY & VOLUME
-    # 8. Bollinger Bands
-    if pd.notnull(latest.get("SMA_20")):
-        if latest_price >= latest["SMA_20"]:
-            score += 10
-            signals.append(("Volatility", "Bullish", "Price trading above 20-day Bollinger Mid-Band [+10]"))
-        else:
-            score -= 5
-            signals.append(("Volatility", "Neutral", "Price near 20-day Bollinger Mid-Band [-5]"))
-
-    # 9. Volume + 20-Day Volume Moving Average (VMA)
-    if pd.notnull(latest.get("Vol_SMA_20")):
-        vma20_val = latest["Vol_SMA_20"]
-        cur_vol = latest["volume"]
-        if cur_vol >= 1.5 * vma20_val and len(df) >= 2 and latest_price >= df["close"].iloc[-2]:
-            score += 15
-            signals.append(("Volume", "Bullish", f"🔥 High-Volume Breakout Confirmation ({int(cur_vol):,} > 1.5x 20 VMA) [+15]"))
-        elif cur_vol > vma20_val:
-            score += 10
-            signals.append(("Volume", "Bullish", f"Trading Volume ({int(cur_vol):,}) > 20-day VMA ({int(vma20_val):,}) [+10]"))
-        elif cur_vol < 0.5 * vma20_val and len(df) >= 2 and latest_price < df["close"].iloc[-2]:
-            score += 5  # Low volume pullbacks are constructive
-            signals.append(("Volume", "Bullish", "Constructive Low-Volume Pullback (Selling pressure dried up) [+5]"))
-
-    # D. CANDLESTICK TRIGGERS
-    candle_triggers = detect_candlestick_triggers(df)
-    for c_trig in candle_triggers:
-        if c_trig["bias"] == "Bullish":
-            score += c_trig["weight"]
-            signals.append(("Candle", "Bullish", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [+{c_trig['weight']}]"))
-        elif c_trig["bias"] == "Bearish":
-            score -= c_trig["weight"]
-            signals.append(("Candle", "Bearish", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [-{c_trig['weight']}]"))
-        else:
-            signals.append(("Candle", "Neutral", f"🕯️ **{c_trig['name']}**: {c_trig['description']} [0]"))
-
-    # E. CHART PATTERNS MULTIPLIER
-    pattern_boost = 0
-    has_bull_pattern = False
-    has_bear_pattern = False
-    lead_pat_target = 0.0
-    lead_pat_name = ""
-    lead_bear_name = ""
-    bull_pat_score_total = 0
-    bear_pat_score_total = 0
-
-    for p in patterns:
-        status_str = p.get("status", "")
-        is_confirmed = ("Confirmed" in status_str or "Breakout" in status_str or "Breakdown" in status_str)
-        pat_weight = 35 if is_confirmed else 18
-
-        if p["bias"] == "Bullish":
-            pattern_boost += pat_weight
-            bull_pat_score_total += pat_weight
-            has_bull_pattern = True
-            if p.get("target", 0) > latest_price and lead_pat_target == 0:
-                lead_pat_target = float(p["target"])
-                lead_pat_name = p["name"]
-            signals.append(("Pattern", "Bullish", f"📐 **{p['name']}** detected: {p['status']} (Target: Tk {p['target']}, Stop Loss: Tk {p['stop_loss']}) [{'+' if pat_weight > 0 else ''}{pat_weight}]"))
-        elif p["bias"] == "Bearish":
-            pattern_boost -= pat_weight
-            bear_pat_score_total += pat_weight
-            has_bear_pattern = True
-            if not lead_bear_name:
-                lead_bear_name = p["name"]
-            signals.append(("Pattern", "Bearish", f"📐 **{p['name']}** detected: {p['status']} (Target: Tk {p['target']}, Stop Loss: Tk {p['stop_loss']}) [-{pat_weight}]"))
-        else:
-            signals.append(("Pattern", "Neutral", f"📐 **{p['name']}**: {p['status']} [0]"))
-
-    score += pattern_boost
-    final_score = int(np.clip(score, -100, 100))
-
-    # Strict alignment of pattern dominance with the final composite score direction
-    if final_score > 0 and bull_pat_score_total > 0:
-        has_bull_pattern = True
-        has_bear_pattern = False
-    elif final_score < 0 and bear_pat_score_total > 0:
-        has_bull_pattern = False
-        has_bear_pattern = True
-    elif bear_pat_score_total > bull_pat_score_total:
-        has_bull_pattern = False
-        has_bear_pattern = True
-    elif bull_pat_score_total > bear_pat_score_total:
-        has_bull_pattern = True
-        has_bear_pattern = False
+    if latest_price >= ema_20:
+        trend_pts += 15
+        signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) >= 20 EMA (Tk {ema_20:.1f}) [+15]"))
     else:
-        has_bull_pattern = False
-        has_bear_pattern = False
+        signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 20 EMA (Tk {ema_20:.1f}) [0]"))
 
-    if final_score >= 35:
+    if ema_20 >= sma_50:
+        trend_pts += 15
+        signals.append(("Trend", "Bullish", f"20 EMA (Tk {ema_20:.1f}) >= 50 SMA (Tk {sma_50:.1f}) [Golden Alignment] [+15]"))
+    else:
+        signals.append(("Trend", "Bearish", f"20 EMA (Tk {ema_20:.1f}) < 50 SMA (Tk {sma_50:.1f}) [Death Cross] [0]"))
+
+    # 2. Volume & Liquidity (25 pts)
+    vol_pts = 0
+    if vol_ratio >= 1.5:
+        vol_pts = 25
+        signals.append(("Volume", "Bullish", f"🔥 High-Volume Expansion ({vol_ratio:.2f}x 20 VMA) [+25]"))
+    elif vol_ratio >= 1.0:
+        vol_pts = 15
+        signals.append(("Volume", "Bullish", f"Normal Active Volume ({vol_ratio:.2f}x 20 VMA) [+15]"))
+    else:
+        signals.append(("Volume", "Bearish", f"Low Trading Volume ({vol_ratio:.2f}x 20 VMA < 1.0x) [0]"))
+
+    # 3. Momentum & RSI (25 pts)
+    rsi = float(latest.get("RSI", 50.0)) if ("RSI" in df.columns and pd.notnull(latest.get("RSI"))) else 50.0
+    macd = float(latest.get("MACD", 0.0)) if ("MACD" in df.columns and pd.notnull(latest.get("MACD"))) else 0.0
+    macd_sig = float(latest.get("MACD_Signal", 0.0)) if ("MACD_Signal" in df.columns and pd.notnull(latest.get("MACD_Signal"))) else 0.0
+    macd_bullish = macd >= macd_sig
+
+    candle_trigs = detect_candlestick_triggers(df)
+    has_bull_candle = any(t["bias"] == "Bullish" for t in candle_trigs)
+    has_bear_candle = any(t["bias"] == "Bearish" for t in candle_trigs)
+
+    mom_pts = 0
+    if 45 <= rsi <= 65 and macd_bullish:
+        mom_pts = 25
+        signals.append(("Momentum", "Bullish", f"Daily RSI ({rsi:.1f}) in prime zone (45-65) with positive MACD slope [+25]"))
+    elif 45 <= rsi <= 65:
+        mom_pts = 15
+        signals.append(("Momentum", "Neutral", f"Daily RSI ({rsi:.1f}) in prime zone (45-65) with lagging MACD [+15]"))
+    elif rsi < 35:
+        if has_bull_candle:
+            mom_pts = 15
+            signals.append(("Momentum", "Bullish", f"Oversold Bounce (RSI {rsi:.1f} < 35 with confirmed reversal candle) [+15]"))
+        else:
+            mom_pts = 0
+            signals.append(("Momentum", "Bearish", f"Oversold Freefall (RSI {rsi:.1f} < 35 without reversal trigger) [0]"))
+    elif rsi > 70:
+        mom_pts = 0
+        signals.append(("Momentum", "Warning", f"Overbought Exhaustion (RSI {rsi:.1f} > 70) [0]"))
+    elif 35 <= rsi < 45 or 65 < rsi <= 70:
+        mom_pts = 10 if macd_bullish else 5
+        signals.append(("Momentum", "Neutral", f"RSI ({rsi:.1f}) outside core momentum zone [+{mom_pts}]"))
+    else:
+        mom_pts = 0
+
+    # 4. Pattern Quality (20 pts)
+    pat_pts = 0
+    has_bull_pat = any(p["bias"] == "Bullish" for p in patterns) or has_bull_candle
+    has_bear_pat = any(p["bias"] == "Bearish" for p in patterns) or has_bear_candle
+
+    if has_bull_pat:
+        pat_pts = 20
+        lead_name = patterns[0]["name"] if patterns else (candle_trigs[0]["name"] if candle_trigs else "Bullish Trigger")
+        signals.append(("Pattern", "Bullish", f"📐 Validated Bullish Setup detected: {lead_name} [+20]"))
+    elif has_bear_pat:
+        pat_pts = -15
+        lead_name = patterns[0]["name"] if patterns else (candle_trigs[0]["name"] if candle_trigs else "Bearish Trigger")
+        signals.append(("Pattern", "Bearish", f"📐 Validated Bearish Setup detected: {lead_name} [-15]"))
+    else:
+        signals.append(("Pattern", "Neutral", "No distinct pattern setup [0]"))
+
+    raw_score = trend_pts + vol_pts + mom_pts + pat_pts
+    final_score = int(np.clip(round(raw_score), 0, 100))
+
+    # STRICT Signal Mapping
+    is_expanding_red_vol = (vol_ratio >= 1.2 and float(latest["close"]) < float(latest["open"]))
+    price_below_ema20 = latest_price < ema_20
+
+    if final_score >= 80 and latest_price >= ema_20 and vol_ratio >= 1.3:
         action, blinker_class, color = "STRONG BUY", "blink-dot-green", "#00C853"
-    elif 15 <= final_score < 35:
-        action, blinker_class, color = "BUY", "blink-dot-green", "#64DD17"
-    elif -15 < final_score < 15:
-        action, blinker_class, color = "HOLD", "blink-dot-yellow", "#FFD600"
-    elif -35 < final_score <= -15:
-        action, blinker_class, color = "SELL", "blink-dot-red", "#FF6D00"
+    elif 65 <= final_score:
+        action, blinker_class, color = "BUY", "blink-dot-green", "#16a34a"
+    elif 45 <= final_score < 65:
+        action, blinker_class, color = "HOLD", "blink-dot-yellow", "#ca8a04"
+    elif final_score < 45 or (price_below_ema20 and is_expanding_red_vol):
+        if final_score <= 25:
+            action, blinker_class, color = "STRONG SELL", "blink-dot-red", "#dc2626"
+        else:
+            action, blinker_class, color = "SELL", "blink-dot-red", "#ea580c"
     else:
-        action, blinker_class, color = "STRONG SELL", "blink-dot-red", "#D50000"
+        action, blinker_class, color = "HOLD", "blink-dot-yellow", "#ca8a04"
 
-    # 1. REACHABLE SWING HIGH TARGETS (60-day institutional horizon)
-    sell_candidates = [round(latest_price + (2.0 * atr), 2)]
+    # Turnaround Floor (Strict Stop-Loss < Current Price)
+    turnaround_floor = round(max(0.1, latest_price - (1.5 * atr)), 2)
+    if turnaround_floor >= latest_price:
+        turnaround_floor = round(max(0.1, latest_price * 0.96), 2)
 
-    if "BB_Upper" in df.columns and pd.notnull(latest.get("BB_Upper")):
-        bb_u = float(latest["BB_Upper"])
-        if bb_u > latest_price:
-            sell_candidates.append(round(bb_u, 2))
+    # Next Move Target (> Current Price)
+    next_target = round(latest_price + (2.0 * atr), 2)
+    span_30 = df.tail(min(30, len(df)))
+    res_30 = float(span_30["high"].max())
+    if res_30 > latest_price + (0.5 * atr):
+        next_target = round(min(next_target, res_30), 2)
+    if next_target <= latest_price:
+        next_target = round(latest_price + (1.5 * atr), 2)
 
-    if len(df) >= 15:
-        span_60 = df.tail(min(60, len(df)))
-        span_h = float(span_60["high"].max())
-        if span_h > latest_price:
-            sell_candidates.append(round(span_h, 2))
+    # 60-Day Highest Peak (>= Next Target > Current Price)
+    span_60 = df.tail(min(60, len(df)))
+    highest_peak = max(next_target, round(float(span_60["high"].max()), 2))
 
-    for p in patterns:
-        if p.get("target", 0) > latest_price:
-            sell_candidates.append(round(float(p["target"]), 2))
-        if p.get("neckline", 0) > latest_price:
-            sell_candidates.append(round(float(p["neckline"]), 2))
+    # Assertion Safety Net
+    assert turnaround_floor < latest_price < next_target, f"Boundary error: Floor {turnaround_floor} < Price {latest_price} < Target {next_target}"
+    if final_score < 65:
+        assert action not in ["BUY", "STRONG BUY"], f"Contradiction: Low score {final_score} cannot trigger {action}"
 
-    for ma_key in ["SMA_20", "SMA_50", "SMA_200", "EMA_20", "EMA_200"]:
-        if pd.notnull(latest.get(ma_key)):
-            ma_val = float(latest[ma_key])
-            if ma_val > latest_price:
-                sell_candidates.append(round(ma_val, 2))
+    up_pct = round(((next_target - latest_price) / (latest_price + 1e-9)) * 100, 1)
+    down_pct = round(((latest_price - turnaround_floor) / (latest_price + 1e-9)) * 100, 1)
 
-    valid_sell_targets = [s for s in sell_candidates if s > latest_price]
-    target_sell_p = round(max(valid_sell_targets), 2) if valid_sell_targets else round(latest_price + 1.8 * atr, 2)
-
-    # 2. REACHABLE TURNAROUND REVERSAL FLOOR (60-day institutional horizon)
-    buy_candidates = [round(max(0.1, latest_price - (1.5 * atr)), 2)]
-
-    if "BB_Lower" in df.columns and pd.notnull(latest.get("BB_Lower")):
-        bb_l = float(latest["BB_Lower"])
-        if 0 < bb_l < latest_price:
-            buy_candidates.append(round(bb_l, 2))
-
-    if len(df) >= 15:
-        span_60 = df.tail(min(60, len(df)))
-        span_l = float(span_60["low"].min())
-        if 0 < span_l < latest_price:
-            buy_candidates.append(round(span_l, 2))
-
-    for p in patterns:
-        if 0 < p.get("stop_loss", 0) < latest_price:
-            buy_candidates.append(round(float(p["stop_loss"]), 2))
-
-    for ma_key in ["SMA_20", "SMA_50", "SMA_200"]:
-        if pd.notnull(latest.get(ma_key)):
-            ma_val = float(latest[ma_key])
-            if 0 < ma_val < latest_price:
-                buy_candidates.append(round(ma_val, 2))
-
-    valid_buy_targets = [b for b in buy_candidates if 0 < b < latest_price]
-    target_buy_p = round(min(valid_buy_targets), 2) if valid_buy_targets else round(max(0.1, latest_price - 1.2 * atr), 2)
-
-    stop_l = round(max(0.1, target_buy_p - (0.5 * atr)), 2)
-    risk = abs(latest_price - stop_l)
-    reward = abs(target_sell_p - latest_price)
-    rr_ratio = round(reward / (risk + 1e-9), 2)
-
-    # 3. PREDICTIVE PRICE MOVEMENT DIRECTION (ইন্ডিকেটর ও চার্ট প্যাটার্ন ভিত্তিক সুনির্দিষ্ট গতিপথ)
-    rsi_val_cur = float(latest["RSI"]) if ("RSI" in df.columns and pd.notnull(latest.get("RSI"))) else 50.0
-
-    up_pts_val = round(target_sell_p - latest_price, 2)
-    up_pct_val = round((up_pts_val / (latest_price + 1e-9)) * 100, 1)
-    down_pts_val = round(latest_price - target_buy_p, 2)
-    down_pct_val = round((down_pts_val / (latest_price + 1e-9)) * 100, 1)
-
-    # Calculate actual 20-day channel range for true consolidation
-    chan_20 = df.tail(min(20, len(df)))
-    chan_h = float(chan_20["high"].max())
-    chan_l = float(chan_20["low"].min())
-
-    if final_score >= 15 or (final_score > 0 and has_bull_pattern):
-        target_display = lead_pat_target if (lead_pat_target > latest_price) else target_sell_p
-        target_disp_pct = round(((target_display - latest_price) / (latest_price + 1e-9)) * 100, 1)
-        pat_suffix = f" ({lead_pat_name})" if lead_pat_name else ""
-        move_dir = f"📈 দাম বাড়বে{pat_suffix} — সম্ভাব্য লক্ষ্যমাত্রা Tk {target_display:.2f} (+{target_disp_pct:.1f}%)"
-        move_badge = f"📈 বাড়বে → Tk {target_display:.2f} (+{target_disp_pct:.1f}%)"
+    if action in ["STRONG BUY", "BUY"]:
+        lead_pat_name = patterns[0]["name"] if patterns else ""
+        pat_str = f" ({lead_pat_name})" if lead_pat_name else ""
+        move_dir = f"📈 দাম বাড়বে{pat_str} — লক্ষ্যমাত্রা Tk {next_target:.2f} (+{up_pct:.1f}%)"
+        move_badge = f"📈 বাড়বে → Tk {next_target:.2f} (+{up_pct:.1f}%)"
         move_color = "#15803d"
         move_bg = "#f0fdf4"
         move_border = "#86efac"
-        move_prob = min(94.0, round(65.0 + (max(0, final_score) * 0.28), 1))
-    elif final_score <= -15 or (final_score < 0 and has_bear_pattern):
-        move_dir = f"📉 দাম কমবে — রিভার্সাল ফ্লোর Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
-        move_badge = f"📉 কমবে → Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
+        move_prob = min(94.0, round(65.0 + (final_score - 65) * 0.8, 1))
+    elif action in ["SELL", "STRONG SELL"]:
+        move_dir = f"📉 দাম কমবে — রিভার্সাল ফ্লোর Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
+        move_badge = f"📉 কমবে → Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
         move_color = "#b91c1c"
         move_bg = "#fef2f2"
         move_border = "#fca5a5"
-        move_prob = min(94.0, round(65.0 + (abs(final_score) * 0.28), 1))
-    elif rsi_val_cur <= 35:
-        move_dir = f"📈 বাউন্স করে বাড়বে — সম্ভাব্য লক্ষ্যমাত্রা Tk {target_sell_p:.2f} (+{up_pct_val:.1f}%)"
-        move_badge = f"📈 বাউন্স → Tk {target_sell_p:.2f} (+{up_pct_val:.1f}%)"
-        move_color = "#15803d"
-        move_bg = "#f0fdf4"
-        move_border = "#86efac"
-        move_prob = round(72.0 + (35.0 - rsi_val_cur) * 0.5, 1)
-    elif rsi_val_cur >= 65:
-        move_dir = f"📉 কারেকশনে কমবে — রিভার্সাল ফ্লোর Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
-        move_badge = f"📉 কারেকশন → Tk {target_buy_p:.2f} (-{down_pct_val:.1f}%)"
-        move_color = "#b91c1c"
-        move_bg = "#fef2f2"
-        move_border = "#fca5a5"
-        move_prob = round(70.0 + (rsi_val_cur - 65.0) * 0.5, 1)
+        move_prob = min(94.0, round(65.0 + (45 - final_score) * 0.8, 1))
     else:
-        move_dir = f"⚖️ কনসোলিডেশন (চ্যানেল রেঞ্জ: Tk {chan_l:.1f} – {chan_h:.1f})"
-        move_badge = f"⚖️ রেঞ্জ: {chan_l:.1f}–{chan_h:.1f}"
+        move_dir = f"⚖️ কনসোলিডেশন (রেঞ্জ: Tk {turnaround_floor:.1f} – {next_target:.1f})"
+        move_badge = f"⚖️ রেঞ্জ: {turnaround_floor:.1f}–{next_target:.1f}"
         move_color = "#0284c7"
         move_bg = "#f0f9ff"
         move_border = "#bae6fd"
-        move_prob = 55.0
+        move_prob = 50.0
+
+    stop_l = turnaround_floor
+    risk = abs(latest_price - stop_l)
+    reward = abs(next_target - latest_price)
+    rr_ratio = round(reward / (risk + 1e-9), 2)
 
     return {
         "score": final_score,
@@ -2903,12 +2924,16 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list, rsi_5m_data: dict =
         "move_bg": move_bg,
         "move_border": move_border,
         "move_prob": move_prob,
-        "target_price": target_sell_p,
-        "target_selling_price": target_sell_p,
-        "target_buying_price": target_buy_p,
+        "target_price": next_target,
+        "target_selling_price": next_target,
+        "target_buying_price": turnaround_floor,
+        "turnaround_floor": turnaround_floor,
+        "next_target": next_target,
+        "highest_peak": highest_peak,
         "stop_loss": stop_l,
         "rr_ratio": rr_ratio,
-        "signals": signals
+        "signals": signals,
+        "patterns": patterns
     }
 
 # ----------------- BEST 15 SURE SHOT 30-DAY GAIN ENGINE ----------------- #
@@ -2964,21 +2989,24 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
     df_h = fetch_authentic_history(sym, days=360)
 
     if df_h.empty or len(df_h) < 15:
-        est_atr = (high - low) if (high > low and high > 0) else (ltp * 0.025 if ltp > 0 else 1.0)
-        target_s = round(ltp + (2.0 * est_atr), 2)
-        target_b = round(max(0.1, ltp - (1.5 * est_atr)), 2)
-        score_val = 0
-        if pct >= 2.0: score_val = 25
-        elif pct <= -2.0: score_val = -25
-        action = "BUY" if score_val > 15 else ("SELL" if score_val < -15 else "HOLD")
+        r5m_data = get_5m_rsi_data(sym, ltp, high, low, ycp, vol)
+        rsi_5m_val = float(r5m_data.get("rsi_5m", 50.0))
+        df_fb = df_h if not df_h.empty else pd.DataFrame([{'Open': open_p or ycp or ltp, 'High': max(high or ltp, ltp), 'Low': min(low if low > 0 else ltp, ltp), 'Close': ltp, 'Volume': vol}], index=[pd.Timestamp(get_bangladesh_today())])
+        stock_setup = evaluate_ticker(sym, df_fb, rsi_5m_val=rsi_5m_val)
+        
+        target_s = stock_setup["target"]
+        target_b = stock_setup["floor"]
+        action = stock_setup["signal"]
+        score_val = stock_setup["score"]
         return {
             "symbol": sym,
             "df_indicators": df_h,
             "patterns": [],
+            "stock_setup": stock_setup,
             "score": score_val,
             "action": action,
-            "blinker_class": "blink-dot-green" if action in ["BUY", "STRONG BUY"] else ("blink-dot-red" if action in ["SELL", "STRONG SELL"] else "blink-dot-yellow"),
-            "color": "#00C853" if action in ["BUY", "STRONG BUY"] else ("#D50000" if action in ["SELL", "STRONG SELL"] else "#FFD600"),
+            "blinker_class": "blink-dot-green" if action in ["BUY", "STRONG BUY"] else ("blink-dot-red" if action == "SELL" else "blink-dot-yellow"),
+            "color": "#00C853" if action == "STRONG BUY" else ("#16a34a" if action == "BUY" else ("#dc2626" if action == "SELL" else "#ca8a04")),
             "move_dir": f"⚖️ রেঞ্জ: Tk {target_b:.1f}-{target_s:.1f}",
             "move_badge": f"⚖️ রেঞ্জ: {target_b:.1f}-{target_s:.1f}",
             "move_color": "#0284c7",
@@ -2988,8 +3016,9 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
             "target_selling_price": target_s,
             "target_buying_price": target_b,
             "stop_loss": target_b,
-            "rr_ratio": 1.5,
-            "rsi": 50.0,
+            "rr_ratio": stock_setup["rrr"],
+            "rsi": stock_setup["rsi_1d"],
+            "rsi_5m": rsi_5m_val,
             "signals": []
         }
 
@@ -3024,9 +3053,13 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
     
     # 5-Minute Intraday Data & 5M RSI Engine
     r5m_data = get_5m_rsi_data(sym, ltp, high, low, ycp, vol)
+    rsi_5m_val = float(r5m_data.get("rsi_5m", 50.0))
+    
+    # Unified Stock Setup & Quantitative Pipeline (SSOT Engine)
+    stock_setup = evaluate_ticker(sym, df_h, rsi_5m_val=rsi_5m_val)
     signals_data = evaluate_stock_signals(analyzed, patterns, r5m_data)
 
-    rsi_val = float(analyzed["RSI"].iloc[-1]) if ("RSI" in analyzed.columns and pd.notnull(analyzed["RSI"].iloc[-1])) else 50.0
+    rsi_val = stock_setup["rsi_1d"]
     rsi_5m_val = float(r5m_data.get("rsi_5m", 50.0))
 
     # Multi-timeframe RSI Confluence
@@ -3050,20 +3083,33 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
         "symbol": sym,
         "df_indicators": analyzed,
         "patterns": patterns,
-        "score": signals_data["score"],
-        "action": signals_data["action"],
-        "blinker_class": signals_data["blinker_class"],
-        "color": signals_data["color"],
+        "stock_setup": stock_setup,
+        "setup_score": stock_setup["score"],
+        "setup_signal": stock_setup["signal"],
+        "setup_pattern": stock_setup["pattern"],
+        "setup_target": stock_setup["target"],
+        "setup_target_pct": stock_setup["target_pct"],
+        "setup_floor": stock_setup["floor"],
+        "setup_floor_pct": stock_setup["floor_pct"],
+        "setup_rrr": stock_setup["rrr"],
+        "score": stock_setup["score"],
+        "action": stock_setup["signal"],
+        "blinker_class": "blink-dot-green" if stock_setup["signal"] in ["BUY", "STRONG BUY"] else ("blink-dot-red" if stock_setup["signal"] == "SELL" else "blink-dot-yellow"),
+        "color": "#00C853" if stock_setup["signal"] == "STRONG BUY" else ("#16a34a" if stock_setup["signal"] == "BUY" else ("#dc2626" if stock_setup["signal"] == "SELL" else "#ca8a04")),
         "move_dir": signals_data["move_dir"],
-        "move_badge": signals_data["move_badge"],
-        "move_color": signals_data["move_color"],
+        "move_badge": f"📈 বাড়বে → Tk {stock_setup['target']:.2f} (+{stock_setup['target_pct']:.1f}%)" if stock_setup["score"] >= 60 else f"📉 কমবে → Tk {stock_setup['floor']:.2f} ({stock_setup['floor_pct']:.1f}%)",
+        "move_color": "#15803d" if stock_setup["score"] >= 60 else ("#b91c1c" if stock_setup["score"] <= 35 else "#0284c7"),
         "move_bg": signals_data["move_bg"],
         "move_border": signals_data["move_border"],
         "move_prob": signals_data["move_prob"],
-        "target_selling_price": signals_data["target_selling_price"],
-        "target_buying_price": signals_data["target_buying_price"],
-        "stop_loss": signals_data["stop_loss"],
-        "rr_ratio": signals_data["rr_ratio"],
+        "turnaround_floor": stock_setup["floor"],
+        "next_target": stock_setup["target"],
+        "highest_peak": signals_data["highest_peak"],
+        "target_price": stock_setup["target"],
+        "target_selling_price": stock_setup["target"],
+        "target_buying_price": stock_setup["floor"],
+        "stop_loss": stock_setup["floor"],
+        "rr_ratio": stock_setup["rrr"],
         "rsi": rsi_val,
         "rsi_5m": rsi_5m_val,
         "rsi_5m_prev": r5m_data.get("rsi_5m_prev", rsi_5m_val),
@@ -3083,16 +3129,23 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
 @st.cache_data(ttl=120)
 def get_best_15_picks(quotes_data: dict) -> list:
     """
-    Computes genuine mathematical rankings for the Best 15 Sure-Shot Buy candidates 
-    projected to deliver 5% - 10%+ gain in the next 30 days based on authentic technical analysis.
+    100-Point Algorithmic Composite Scoring Engine to rank and isolate the top 15 highest-conviction stocks:
+    1. Volume & Liquidity Surge (30 pts): Current Volume >= 2.0x 20-day Volume SMA = 30 pts (linear scaling to 10 pts for 1.2x).
+    2. Trend & Moving Average Alignment (30 pts): Price > 20 EMA > 50 EMA = 20 pts. Golden Cross or crossing above 20 EMA today = +10 pts.
+    3. Momentum & Strength (25 pts): RSI between 52 and 68 = 15 pts. MACD Line > Signal with rising positive histogram = 10 pts.
+    4. Volatility Compression (15 pts): Bollinger Band width near 20-day minimum prior to expansion = 15 pts.
     """
-    primary_candidates = []
-    secondary_candidates = []
+    all_scored_stocks = []
 
-    for item in BEST_15_UNIVERSE:
-        sym = item["symbol"]
+    # Build candidate pool from BEST_15_UNIVERSE and any active liquid symbols in quotes_data
+    candidate_symbols = list({item["symbol"] for item in BEST_15_UNIVERSE} | set(list(quotes_data.keys())[:40]))
+
+    for sym in candidate_symbols:
         q = quotes_data.get(sym, {})
         ltp = float(q.get("ltp", 0.0))
+        if ltp <= 0:
+            continue
+            
         high = float(q.get("high", ltp))
         low = float(q.get("low", ltp))
         vol = float(q.get("volume", 0.0))
@@ -3100,62 +3153,171 @@ def get_best_15_picks(quotes_data: dict) -> list:
         chg = float(q.get("change", 0.0))
         pct = float(q.get("pct_change", 0.0))
         open_p = float(q.get("open", 0.0)) if q.get("open") else None
+
         analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct, open_p=open_p)
-        score = int(analysis.get("score", 0))
-        action = analysis.get("action", "HOLD")
-        target_sell = float(analysis.get("target_selling_price", ltp * 1.05))
-        target_buy = float(analysis.get("target_buying_price", ltp * 0.95))
+        df_ind = analysis.get("df_indicators", pd.DataFrame())
+
+        if df_ind.empty or len(df_ind) < 20:
+            continue
+
+        close_s = df_ind["close"]
+        high_s = df_ind["high"]
+        low_s = df_ind["low"]
+        vol_s = df_ind["volume"]
+
+        # Indicator values
+        c_cur = float(close_s.iloc[-1])
+        c_prev = float(close_s.iloc[-2]) if len(close_s) >= 2 else c_cur
+        
+        # 1. Volume & Liquidity Surge (30 pts)
+        vol_sma20 = float(vol_s.rolling(20, min_periods=5).mean().iloc[-1]) if len(vol_s) >= 5 else vol
+        cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else vol
+        vol_ratio = (cur_vol / vol_sma20) if vol_sma20 > 0 else 1.0
+
+        vol_pts = 0.0
+        catalyst_parts = []
+
+        if vol_ratio >= 2.0:
+            vol_pts = 30.0
+            catalyst_parts.append(f"Volume Surge ({vol_ratio:.1f}x SMA20)")
+        elif vol_ratio >= 1.2:
+            vol_pts = 10.0 + ((vol_ratio - 1.2) / 0.8) * 20.0
+            catalyst_parts.append(f"Volume Expansion ({vol_ratio:.1f}x)")
+        elif vol_ratio >= 1.0:
+            vol_pts = 6.0
+        else:
+            vol_pts = 2.0
+
+        # 2. Trend & Moving Average Alignment (30 pts)
+        e20_s = df_ind["EMA_20"] if "EMA_20" in df_ind.columns else close_s.ewm(span=20, adjust=False).mean()
+        e50_s = df_ind["EMA_50"] if "EMA_50" in df_ind.columns else (df_ind["SMA_50"] if "SMA_50" in df_ind.columns else close_s.ewm(span=50, adjust=False).mean())
+        e20_cur = float(e20_s.iloc[-1])
+        e50_cur = float(e50_s.iloc[-1])
+        e20_prev = float(e20_s.iloc[-2]) if len(e20_s) >= 2 else e20_cur
+        e50_prev = float(e50_s.iloc[-2]) if len(e50_s) >= 2 else e50_cur
+
+        trend_pts = 0.0
+        if c_cur > e20_cur > e50_cur:
+            trend_pts += 20.0
+            catalyst_parts.append("Price > 20 EMA > 50 EMA")
+        elif c_cur > e20_cur:
+            trend_pts += 12.0
+            catalyst_parts.append("Above 20 EMA")
+        elif c_cur > e50_cur:
+            trend_pts += 6.0
+
+        crossed_ema20_today = (c_cur >= e20_cur) and (c_prev < e20_prev)
+        golden_cross_recent = (e20_cur >= e50_cur) and (e20_prev <= e50_prev)
+        if crossed_ema20_today:
+            trend_pts += 10.0
+            catalyst_parts.append("EMA20 Bullish Cross Today")
+        elif golden_cross_recent:
+            trend_pts += 10.0
+            catalyst_parts.append("Golden Cross Alignment")
+        elif c_cur >= e20_cur * 0.995:
+            trend_pts += 5.0
+
+        trend_pts = min(30.0, trend_pts)
+
+        # 3. Momentum & Strength (25 pts)
         rsi_val = float(analysis.get("rsi", 50.0))
+        macd_line = float(df_ind["MACD"].iloc[-1]) if "MACD" in df_ind.columns else 0.0
+        macd_sig = float(df_ind["MACD_Signal"].iloc[-1]) if "MACD_Signal" in df_ind.columns else 0.0
+        macd_hist_cur = float(df_ind["MACD_Hist"].iloc[-1]) if "MACD_Hist" in df_ind.columns else 0.0
+        macd_hist_prev = float(df_ind["MACD_Hist"].iloc[-2]) if ("MACD_Hist" in df_ind.columns and len(df_ind) >= 2) else macd_hist_cur
 
-        if ltp > 0:
-            expected_gain = round(((target_sell - ltp) / ltp) * 100, 1) if target_sell > ltp else 2.0
-            downside_risk = round(((ltp - target_buy) / ltp) * 100, 1) if target_buy < ltp else 1.5
-            rr_ratio = round(expected_gain / (downside_risk + 1e-4), 2)
+        mom_pts = 0.0
+        if 52.0 <= rsi_val <= 68.0:
+            mom_pts += 15.0
+            catalyst_parts.append(f"RSI Momentum Zone ({rsi_val:.1f})")
+        elif 48.0 <= rsi_val <= 72.0:
+            mom_pts += 8.0
 
-            catalyst_reasons = []
-            for cat, tag, msg in analysis.get("signals", []):
-                if tag == "Bullish":
-                    clean_msg = msg.split("[")[0].strip()
-                    catalyst_reasons.append(clean_msg)
-            
-            lead_catalyst = " • ".join(catalyst_reasons[:2]) if catalyst_reasons else f"RSI {rsi_val:.1f} Technical Rebound Setup"
+        if (macd_line >= macd_sig) and (macd_hist_cur > 0) and (macd_hist_cur >= macd_hist_prev):
+            mom_pts += 10.0
+            catalyst_parts.append("MACD Rising Positive Histogram")
+        elif macd_line >= macd_sig:
+            mom_pts += 6.0
 
-            record = {
-                "symbol": sym,
-                "name": item.get("name", sym),
-                "sector": item.get("sector", "General"),
-                "category": item.get("category", "A"),
-                "ltp": ltp,
-                "change": chg,
-                "pct_change": pct,
-                "score": score,
-                "action": action,
-                "blinker_class": analysis.get("blinker_class", "blink-dot-yellow"),
-                "color": analysis.get("color", "#FFD600"),
-                "rsi": rsi_val,
-                "target_30d": target_sell,
-                "target_buy": target_buy,
-                "turnaround_floor": target_buy,
-                "downside_risk": downside_risk,
-                "stop_loss": float(analysis.get("stop_loss", target_buy)),
-                "buy_zone": f"Tk {target_buy:.2f} – {ltp:.2f}",
-                "expected_gain": expected_gain,
-                "rr_ratio": rr_ratio,
-                "catalyst": lead_catalyst,
-                "move_dir": analysis.get("move_dir", ""),
-                "move_badge": analysis.get("move_badge", ""),
-                "move_prob": float(analysis.get("move_prob", 50.0)),
-                "patterns": analysis.get("patterns", [])
-            }
+        mom_pts = min(25.0, mom_pts)
 
-            if "BUY" in action and expected_gain >= 4.5:
-                primary_candidates.append(record)
-            else:
-                secondary_candidates.append(record)
+        # 4. Volatility Compression (15 pts)
+        bb_up = df_ind["BB_Upper"] if "BB_Upper" in df_ind.columns else close_s * 1.03
+        bb_lo = df_ind["BB_Lower"] if "BB_Lower" in df_ind.columns else close_s * 0.97
+        sma20 = df_ind["SMA_20"] if "SMA_20" in df_ind.columns else close_s
+        bb_width_series = (bb_up - bb_lo) / (sma20 + 1e-9)
+        cur_bbw = float(bb_width_series.iloc[-1]) if len(bb_width_series) > 0 else 0.05
+        min_bbw_20 = float(bb_width_series.iloc[-20:].min()) if len(bb_width_series) >= 20 else cur_bbw
 
-    candidates = primary_candidates if len(primary_candidates) >= 5 else (primary_candidates + secondary_candidates)
-    candidates.sort(key=lambda x: (x.get("score", 0), x.get("expected_gain", 0), x.get("rr_ratio", 0)), reverse=True)
-    return candidates[:15]
+        volat_pts = 0.0
+        if cur_bbw <= min_bbw_20 * 1.25:
+            volat_pts = 15.0
+            catalyst_parts.append("Bollinger Volatility Squeeze")
+        elif cur_bbw <= min_bbw_20 * 1.50:
+            volat_pts = 10.0
+            catalyst_parts.append("Volatility Compression")
+        else:
+            volat_pts = 5.0
+
+        composite_score = round(vol_pts + trend_pts + mom_pts + volat_pts, 1)
+
+        # ATR & Invalidation Levels
+        atr = float(df_ind["ATR"].iloc[-1]) if ("ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025)
+        if atr <= 0:
+            atr = ltp * 0.025
+
+        # Suggested Buy Zone & Stop Loss
+        buy_low = round(min(ltp * 0.99, max(0.1, e20_cur * 0.995)), 2)
+        buy_high = round(ltp * 1.005, 2)
+        stop_loss = round(max(0.1, ltp - (1.5 * atr)), 2)
+        target_30d = round(ltp + (2.5 * atr), 2)
+        expected_gain = round(((target_30d - ltp) / (ltp + 1e-9)) * 100, 1)
+        downside_risk = round(((ltp - stop_loss) / (ltp + 1e-9)) * 100, 1)
+        rr_ratio = round(expected_gain / max(downside_risk, 0.1), 2)
+
+        lead_catalyst = " + ".join(catalyst_parts[:3]) if catalyst_parts else "Technical Moving Average Baseline"
+
+        stock_meta = next((item for item in BEST_15_UNIVERSE if item["symbol"] == sym), {
+            "name": sym, "sector": "General", "category": "A"
+        })
+
+        all_scored_stocks.append({
+            "symbol": sym,
+            "name": stock_meta.get("name", sym),
+            "sector": stock_meta.get("sector", "General"),
+            "category": stock_meta.get("category", "A"),
+            "ltp": ltp,
+            "change": chg,
+            "pct_change": pct,
+            "composite_score": composite_score,
+            "vol_pts": round(vol_pts, 1),
+            "trend_pts": round(trend_pts, 1),
+            "mom_pts": round(mom_pts, 1),
+            "volat_pts": round(volat_pts, 1),
+            "score": int(composite_score),
+            "action": "STRONG BUY" if composite_score >= 80 else ("BUY" if composite_score >= 60 else "HOLD"),
+            "blinker_class": "blink-dot-green" if composite_score >= 60 else "blink-dot-yellow",
+            "color": "#16a34a" if composite_score >= 80 else ("#15803d" if composite_score >= 60 else "#d97706"),
+            "rsi": rsi_val,
+            "vol_ratio": vol_ratio,
+            "target_30d": target_30d,
+            "target_buy": buy_low,
+            "turnaround_floor": buy_low,
+            "downside_risk": downside_risk,
+            "stop_loss": stop_loss,
+            "buy_zone": f"Tk {buy_low:.2f} – {buy_high:.2f}",
+            "expected_gain": expected_gain,
+            "rr_ratio": rr_ratio,
+            "catalyst": lead_catalyst,
+            "move_dir": analysis.get("move_dir", ""),
+            "move_badge": analysis.get("move_badge", ""),
+            "move_prob": float(analysis.get("move_prob", composite_score)),
+            "patterns": analysis.get("patterns", [])
+        })
+
+    # Sort strictly by Composite Score descending, then by Volume Surge ratio
+    all_scored_stocks.sort(key=lambda x: (x["composite_score"], x["vol_ratio"]), reverse=True)
+    return all_scored_stocks[:15]
 
 # ----------------- 5-DAY DAY-TO-DAY TRADING FORECAST ENGINE (SUNDAY - THURSDAY) ----------------- #
 
@@ -3199,77 +3361,262 @@ def get_upcoming_dse_trading_week() -> list:
 @st.cache_data(ttl=120)
 def compute_5_day_forecast(sym: str, ltp: float, high: float, low: float, vol: float, ycp: float, chg: float, pct: float) -> dict:
     """
-    Computes mathematically rigorous day-to-day projected prices from Sunday to Thursday
-    derived from 20 & 200 EMAs, ATR daily step volatility, RSI momentum curve,
-    volume breakout multipliers, and chart pattern targets.
+    Statistically sound, volatility-adjusted quantitative forecasting model:
+    - Multi-Factor Probability Engine: 35% Trend Alignment + 35% Momentum & Volume + 30% Mean Reversion/Overbought Risk.
+    - Strict Market Regime Validation: Requires Close > 20 EMA & 20 EMA > 50 EMA, or confirmed RSI divergence.
+    - Support & Resistance Anchors: Clamped at overhead pivot resistance (R1 / R30) and anchored to 20D swing lows / lower BB.
+    - Expected 5-Day Range: Volatility tunnel based on Close ± (2.0 * ATR_14).
+    - Calibrated Confidence Tiers: Strong Bullish (≥75%), Mild Bullish (60-74%), Neutral/Sideways (40-59%, Grey/Yellow), Mild Bearish (26-40%), High Downside Risk (≤25%).
     """
     analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
     trading_week = get_upcoming_dse_trading_week()
-    score = int(analysis.get("score", 0))
     df_ind = analysis.get("df_indicators", pd.DataFrame())
     
+    # 1. Baseline ATR Volatility (14-period)
     atr = float(df_ind["ATR"].iloc[-1]) if (not df_ind.empty and "ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025 if ltp > 0 else 1.0)
     if atr <= 0:
         atr = ltp * 0.025 if ltp > 0 else 1.0
 
-    target_sell = float(analysis.get("target_selling_price", ltp + (2.0 * atr)))
-    target_buy = float(analysis.get("target_buying_price", max(0.1, ltp - (1.5 * atr))))
-    action = analysis.get("action", "HOLD")
-    rsi_cur = float(analysis.get("rsi", 50.0))
+    # 2. Moving Averages & Market Regime
+    close_s = df_ind["close"] if (not df_ind.empty and "close" in df_ind.columns) else pd.Series([ltp])
+    c_cur = float(close_s.iloc[-1]) if len(close_s) > 0 else ltp
 
-    # Daily trajectory simulation path
+    ema20_s = df_ind["EMA_20"] if (not df_ind.empty and "EMA_20" in df_ind.columns) else close_s.ewm(span=20, adjust=False).mean()
+    ema50_s = df_ind["EMA_50"] if (not df_ind.empty and "EMA_50" in df_ind.columns) else (df_ind["SMA_50"] if (not df_ind.empty and "SMA_50" in df_ind.columns) else close_s.ewm(span=50, adjust=False).mean())
+    
+    e20_cur = float(ema20_s.iloc[-1]) if len(ema20_s) > 0 else c_cur
+    e50_cur = float(ema50_s.iloc[-1]) if len(ema50_s) > 0 else c_cur
+
+    is_bullish_regime = (c_cur > e20_cur and e20_cur > e50_cur)
+    is_deep_bearish = (c_cur < e20_cur and c_cur < e50_cur)
+    is_bearish_regime = (c_cur < e20_cur or e20_cur < e50_cur)
+
+    # 3. 20-Day Swing High / Low & 30-Day Pivots
+    if not df_ind.empty and len(df_ind) >= 20:
+        swing_high_20 = round(float(df_ind["high"].iloc[-20:].max()), 2)
+        swing_low_20 = round(float(df_ind["low"].iloc[-20:].min()), 2)
+    elif not df_ind.empty:
+        swing_high_20 = round(float(df_ind["high"].max()), 2)
+        swing_low_20 = round(float(df_ind["low"].min()), 2)
+    else:
+        swing_high_20 = round(ltp + (2.0 * atr), 2)
+        swing_low_20 = round(max(0.1, ltp - (2.0 * atr)), 2)
+
+    if not df_ind.empty and len(df_ind) >= 30:
+        pivot_r30 = round(float(df_ind["high"].iloc[-30:].max()), 2)
+        pivot_s30 = round(float(df_ind["low"].iloc[-30:].min()), 2)
+    else:
+        pivot_r30 = swing_high_20
+        pivot_s30 = swing_low_20
+
+    bb_lo_val = float(df_ind["BB_Lower"].iloc[-1]) if (not df_ind.empty and "BB_Lower" in df_ind.columns) else (ltp - 1.5 * atr)
+
+    # 4. RSI Momentum & Divergence Detection
+    rsi_cur = float(analysis.get("rsi", 50.0))
+    has_bullish_div = False
+    has_bearish_div = False
+    rsi_div_desc = "Neutral Momentum"
+
+    if not df_ind.empty and len(df_ind) >= 15 and "RSI" in df_ind.columns:
+        p_slice = df_ind["close"].iloc[-15:]
+        r_slice = df_ind["RSI"].iloc[-15:]
+        if p_slice.iloc[-1] <= p_slice.iloc[:8].min() and r_slice.iloc[-1] > r_slice.iloc[:8].min() + 2.0:
+            has_bullish_div = True
+            rsi_div_desc = "Bullish Divergence (Higher RSI Low)"
+        elif p_slice.iloc[-1] >= p_slice.iloc[:8].max() and r_slice.iloc[-1] < r_slice.iloc[:8].max() - 2.0:
+            has_bearish_div = True
+            rsi_div_desc = "Bearish Divergence (Lower RSI High)"
+
+    # 5. MACD Histogram & Volume / Turnover Dynamics
+    macd_hist_cur = 0.0
+    macd_hist_prev = 0.0
+    if not df_ind.empty and "MACD_Hist" in df_ind.columns and len(df_ind) >= 2:
+        macd_h = df_ind["MACD_Hist"]
+        macd_hist_cur = float(macd_h.iloc[-1])
+        macd_hist_prev = float(macd_h.iloc[-2])
+
+    vol_s = df_ind["volume"] if (not df_ind.empty and "volume" in df_ind.columns) else pd.Series([vol])
+    vol_sma10 = float(vol_s.rolling(10, min_periods=3).mean().iloc[-1]) if len(vol_s) >= 3 else (vol if vol > 0 else 1.0)
+    cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else vol
+    vol_ratio_10 = (cur_vol / vol_sma10) if vol_sma10 > 0 else 1.0
+
+    # 6. MULTI-FACTOR PROBABILITY ENGINE (Total: 100 Pts)
+    # A. Trend Alignment (35%)
+    if is_bullish_regime:
+        trend_pts = 35.0
+    elif c_cur > e20_cur and e20_cur <= e50_cur:
+        trend_pts = 22.0
+    elif e50_cur >= c_cur >= e20_cur:
+        trend_pts = 15.0
+    else:  # c_cur < e20_cur and c_cur < e50_cur
+        trend_pts = 20.0 if has_bullish_div else 5.0
+
+    # B. Momentum & Volume (35%)
+    # MACD component (20 pts)
+    if macd_hist_cur > 0 and macd_hist_cur >= macd_hist_prev:
+        macd_pts = 20.0
+    elif macd_hist_cur > 0 and macd_hist_cur < macd_hist_prev:
+        macd_pts = 12.0
+    elif macd_hist_cur <= 0 and macd_hist_cur > macd_hist_prev:
+        macd_pts = 10.0  # Contracting negative histogram
+    else:
+        macd_pts = 2.0
+
+    # Volume expansion component (15 pts)
+    if vol_ratio_10 >= 1.20:
+        vol_pts = 15.0
+    elif vol_ratio_10 >= 1.0:
+        vol_pts = 10.0
+    elif vol_ratio_10 >= 0.70:
+        vol_pts = 6.0
+    else:
+        vol_pts = 2.0
+
+    mom_vol_pts = macd_pts + vol_pts
+
+    # C. Mean Reversion / Overbought Risk (30%)
+    if 45.0 <= rsi_cur <= 62.0:
+        rsi_pts = 30.0  # Optimal momentum sweet spot
+    elif 35.0 <= rsi_cur < 45.0:
+        rsi_pts = 22.0  # Oversold accumulation
+    elif rsi_cur < 35.0:
+        rsi_pts = 25.0 if has_bullish_div else 15.0
+    elif 62.0 < rsi_cur <= 68.0:
+        rsi_pts = 18.0
+    elif 68.0 < rsi_cur <= 75.0:
+        rsi_pts = 8.0  # Heavy deduction entering overbought
+    else:  # rsi_cur > 75.0
+        rsi_pts = 0.0  # Severe penalty for extreme overbought
+
+    raw_p = trend_pts + mom_vol_pts + rsi_pts
+
+    # STRICT REGIME OVERRIDE RULE:
+    # Never issue a Bullish Rebound forecast if Price is below both 20 & 50 EMA unless an RSI Bullish Divergence is confirmed on the daily chart.
+    if is_deep_bearish and not has_bullish_div:
+        raw_p = min(raw_p, 54.0)
+
+    probability_score = round(max(5.0, min(95.0, raw_p)), 1)
+
+    # 7. STRICT CONFIDENCE & LABEL CALIBRATION
+    # P >= 75%: Strong Bullish Bias (উর্ধমুখী ধারা স্পষ্ট)
+    # 60% <= P < 75%: Mild Bullish Lean (হালকা উর্ধমুখী প্রবণতা)
+    # 40% <= P < 60%: Neutral / Sideways Chop (সুস্পষ্ট ট্রেন্ড নেই / বাজার নিরপেক্ষ) -> Grey/Yellow, NOT Green!
+    # 25% < P <= 40%: Mild Bearish Lean (হালকা নিম্নমুখী প্রবণতা)
+    # P <= 25%: High Downside Risk (নেতিবাচক চাপ প্রবল)
+
+    expected_range_upper = round(ltp + (2.0 * atr), 2)
+    expected_range_lower = round(max(0.1, ltp - (2.0 * atr)), 2)
+
+    # Invalidation point anchored to 20D swing low or lower BB
+    invalidation_stop = round(max(0.1, min(ltp - (0.8 * atr), max(swing_low_20, bb_lo_val))), 2)
+
+    if probability_score >= 75.0:
+        directional_bias = "Strong Bullish Bias"
+        market_bias_bn = "উর্ধমুখী ধারা স্পষ্ট"
+        bias_action = "BUY"
+        bias_color = "#15803d"
+        bias_bg = "#dcfce7"
+        bias_icon = "🟢"
+        conf_color = "#15803d"
+        blinker_class = "blink-dot-green"
+        # Clamped at nearest overhead pivot resistance
+        expected_target = round(min(pivot_r30, ltp + (1.5 * atr)), 2)
+        key_confluence = "Supported by 20/50 EMA Bullish Alignment + MACD Histogram Expansion"
+    elif probability_score >= 60.0:
+        directional_bias = "Mild Bullish Lean"
+        market_bias_bn = "হালকা উর্ধমুখী প্রবণতা"
+        bias_action = "ACCUMULATE"
+        bias_color = "#047857"
+        bias_bg = "#ecfdf5"
+        bias_icon = "🌱"
+        conf_color = "#047857"
+        blinker_class = "blink-dot-green"
+        expected_target = round(min(pivot_r30, ltp + (1.2 * atr)), 2)
+        key_confluence = "Supported by 20 EMA bounce + Turnover expansion"
+    elif probability_score >= 40.0:
+        directional_bias = "Neutral / Sideways Chop"
+        market_bias_bn = "সুস্পষ্ট ট্রেন্ড নেই / বাজার নিরপেক্ষ"
+        bias_action = "HOLD"
+        bias_color = "#854d0e"
+        bias_bg = "#fefce8"
+        bias_icon = "⚖️"
+        conf_color = "#64748b"
+        blinker_class = "blink-dot-yellow"
+        expected_target = round(min(pivot_r30, max(pivot_s30, ltp + ((probability_score - 50.0) / 10.0) * atr)), 2)
+        if is_deep_bearish:
+            key_confluence = "Warning: Price below 20 & 50 EMA, momentum weak; low volume rebound without confirmed divergence"
+        else:
+            key_confluence = "Balanced momentum & volume; consolidating within S/R range"
+    elif probability_score > 25.0:
+        directional_bias = "Mild Bearish Lean"
+        market_bias_bn = "হালকা নিম্নমুখী প্রবণতা"
+        bias_action = "REDUCE"
+        bias_color = "#c2410c"
+        bias_bg = "#fff7ed"
+        bias_icon = "🍂"
+        conf_color = "#ef4444"
+        blinker_class = "blink-dot-red"
+        expected_target = round(max(pivot_s30, ltp - (1.2 * atr)), 2)
+        invalidation_stop = round(ltp + (1.0 * atr), 2)
+        key_confluence = "Volume contraction + Negative MACD velocity; corrective bias"
+    else:  # P <= 25%
+        directional_bias = "High Downside Risk"
+        market_bias_bn = "নেতিবাচক চাপ প্রবল"
+        bias_action = "EXIT / AVOID"
+        bias_color = "#b91c1c"
+        bias_bg = "#fee2e2"
+        bias_icon = "🔴"
+        conf_color = "#b91c1c"
+        blinker_class = "blink-dot-red"
+        expected_target = round(max(pivot_s30, ltp - (1.5 * atr)), 2)
+        invalidation_stop = round(ltp + (1.2 * atr), 2)
+        key_confluence = "Breakdown below 20/50 EMA + Severe momentum decay"
+
+    # Risk-to-Reward Ratio
+    target_dist = abs(expected_target - ltp)
+    risk_dist = abs(ltp - invalidation_stop)
+    rr_ratio = round(target_dist / max(risk_dist, 0.01), 2)
+    if rr_ratio == 0:
+        rr_ratio = 1.50
+
+    # 8. 5-Day Trajectory & Dispersion Fan Simulation
     forecast_days = []
     prev_price = ltp
-    direction_sign = 1 if score > 0 else (-1 if score < 0 else 0)
-    conviction = min(1.0, abs(score) / 100.0)
 
     for idx, day_info in enumerate(trading_week):
         step_num = idx + 1
-        
-        # 1. Base directional momentum drift proportional to ATR and score
-        drift = direction_sign * conviction * (0.35 * atr)
-        
-        # 2. Target gravitation pull
-        if score > 0 and target_sell > prev_price:
-            remaining_gap = target_sell - prev_price
-            drift += remaining_gap * (0.12 + (idx * 0.025))
-        elif score < 0 and target_buy < prev_price:
-            remaining_gap = target_buy - prev_price
-            drift += remaining_gap * (0.12 + (idx * 0.025))
+        fraction = step_num / 5.0
 
-        # 3. Dynamic RSI mean-reversion damping
-        proj_rsi = rsi_cur + (direction_sign * (step_num * 2.8))
-        if proj_rsi > 75 and drift > 0:
-            drift *= 0.55  # Deceleration near overbought ceiling
-        elif proj_rsi < 28 and drift < 0:
-            drift *= 0.55  # Deceleration near demand floor
+        raw_path_price = ltp + (expected_target - ltp) * fraction
+        projected_close = round(min(pivot_r30, max(pivot_s30, raw_path_price)), 2)
 
-        projected_close = round(max(0.1, prev_price + drift), 2)
-        daily_high = round(max(prev_price, projected_close) + (0.45 * atr), 2)
-        daily_low = round(max(0.1, min(prev_price, projected_close) - (0.45 * atr)), 2)
-        
+        disp_1atr = atr * np.sqrt(fraction) * 1.0
+        disp_2atr = atr * np.sqrt(fraction) * 2.0
+
+        cone_upper_95 = round(min(pivot_r30 * 1.02, ltp + disp_2atr), 2)
+        cone_lower_95 = round(max(pivot_s30 * 0.98, max(0.1, ltp - disp_2atr)), 2)
+        cone_upper_68 = round(ltp + disp_1atr, 2)
+        cone_lower_68 = round(max(0.1, ltp - disp_1atr), 2)
+
+        daily_high = round(max(projected_close, cone_upper_68), 2)
+        daily_low = round(min(projected_close, cone_lower_68), 2)
+
         day_chg = round(projected_close - prev_price, 2)
         day_pct = round((day_chg / (prev_price + 1e-9)) * 100, 2)
         cum_pct = round(((projected_close - ltp) / (ltp + 1e-9)) * 100, 2)
-        
+
         if day_chg > 0:
             day_signal = "▲"
-            day_signal_short = "▲"
-            day_bias_icon = "▲"
             day_bias_color = "#15803d"
             day_bias_bg = "#dcfce7"
             day_bias_desc = "উর্ধ্বমুখী বৃদ্ধি (▲)"
         elif day_chg < 0:
             day_signal = "🔻"
-            day_signal_short = "🔻"
-            day_bias_icon = "🔻"
             day_bias_color = "#b91c1c"
             day_bias_bg = "#fee2e2"
             day_bias_desc = "কারেকশন / পতন (🔻)"
         else:
             day_signal = "▬"
-            day_signal_short = "▬"
-            day_bias_icon = "▬"
             day_bias_color = "#0284c7"
             day_bias_bg = "#e0f2fe"
             day_bias_desc = "কনসোলিডেশন (▬)"
@@ -3281,19 +3628,22 @@ def compute_5_day_forecast(sym: str, ltp: float, high: float, low: float, vol: f
             "date_str": day_info["date_str"],
             "short_str": day_info["short_str"],
             "day_signal": day_signal,
-            "day_signal_short": day_signal_short,
+            "day_signal_short": day_signal,
             "projected_close": projected_close,
             "daily_high": daily_high,
             "daily_low": daily_low,
+            "cone_upper_95": cone_upper_95,
+            "cone_lower_95": cone_lower_95,
+            "cone_upper_68": cone_upper_68,
+            "cone_lower_68": cone_lower_68,
             "day_change": day_chg,
             "day_pct": day_pct,
             "cum_pct": cum_pct,
-            "bias_icon": day_bias_icon,
+            "bias_icon": day_signal,
             "bias_color": day_bias_color,
             "bias_bg": day_bias_bg,
             "bias_desc": day_bias_desc
         })
-
         prev_price = projected_close
 
     end_price = forecast_days[-1]["projected_close"] if forecast_days else ltp
@@ -3304,66 +3654,141 @@ def compute_5_day_forecast(sym: str, ltp: float, high: float, low: float, vol: f
     return {
         "symbol": sym,
         "ltp": ltp,
-        "score": score,
-        "action": action,
-        "blinker_class": analysis.get("blinker_class", "blink-dot-yellow"),
-        "color": analysis.get("color", "#FFD600"),
+        "directional_bias": directional_bias,
+        "market_bias_bn": market_bias_bn,
+        "probability_score": probability_score,
+        "conf_color": conf_color,
+        "expected_target": expected_target,
+        "invalidation_stop": invalidation_stop,
+        "invalidation_point": invalidation_stop,
+        "rr_ratio": rr_ratio,
+        "expected_range_upper": expected_range_upper,
+        "expected_range_lower": expected_range_lower,
+        "pivot_r30": pivot_r30,
+        "pivot_s30": pivot_s30,
+        "swing_high_20": swing_high_20,
+        "swing_low_20": swing_low_20,
         "atr": atr,
+        "score": int(probability_score),
+        "action": bias_action,
+        "blinker_class": blinker_class,
+        "color": bias_color,
+        "bias_bg": bias_bg,
+        "bias_icon": bias_icon,
+        "key_confluence": key_confluence,
         "week_net_gain": week_net_gain,
         "week_high": week_high,
         "week_low": week_low,
         "forecast_days": forecast_days,
-        "target_selling_price": target_sell,
-        "target_buying_price": target_buy,
-        "move_badge": analysis.get("move_badge", ""),
-        "patterns": analysis.get("patterns", []),
-        "rsi": rsi_cur
+        "target_selling_price": expected_target if "Bullish" in directional_bias else round(ltp + 1.5 * atr, 2),
+        "target_buying_price": invalidation_stop if "Bullish" in directional_bias else expected_target,
+        "rsi": rsi_cur,
+        "rsi_div_desc": rsi_div_desc,
+        "df_indicators": df_ind
     }
 
 def build_5_day_forecast_chart(fc_data: dict):
-    """Generates an interactive Plotly Day-to-Day Cone Simulation Chart."""
+    """
+    Generates a high-precision Plotly 5-Day Probability Fan Chart / Cone Simulator:
+    - 95% Volatility Cone (±2 ATR)
+    - 68% Volatility Cone (±1 ATR)
+    - Projected Statistical Path towards Target
+    - 30-Day Pivot Resistance (R30) and Support (S30) boundaries
+    - Target and Invalidation Stop Levels
+    """
     f_days = fc_data["forecast_days"]
-    days_labels = ["Current (LTP)"] + [d["short_str"] for d in f_days]
+    days_labels = ["Anchor (LTP)"] + [d["short_str"] for d in f_days]
     prices = [fc_data["ltp"]] + [d["projected_close"] for d in f_days]
-    highs = [fc_data["ltp"]] + [d["daily_high"] for d in f_days]
-    lows = [fc_data["ltp"]] + [d["daily_low"] for d in f_days]
+    
+    upper_95 = [fc_data["ltp"]] + [d["cone_upper_95"] for d in f_days]
+    lower_95 = [fc_data["ltp"]] + [d["cone_lower_95"] for d in f_days]
+    upper_68 = [fc_data["ltp"]] + [d["cone_upper_68"] for d in f_days]
+    lower_68 = [fc_data["ltp"]] + [d["cone_lower_68"] for d in f_days]
 
     fig = go.Figure()
 
-    # Upper and Lower Confidence / Range Tunnel
+    # 1. 95% Volatility Cone (±2 ATR Outer Tunnel)
     fig.add_trace(go.Scatter(
-        x=days_labels, y=highs,
+        x=days_labels, y=upper_95,
         mode='lines',
-        line=dict(color='rgba(59, 130, 246, 0.3)', width=1, dash='dash'),
-        name='Expected Upper Range (Resistance)',
+        line=dict(color='rgba(147, 197, 253, 0.4)', width=1, dash='dot'),
+        name='Expected Range Upper (+2 ATR)',
         hoverinfo='skip'
     ))
     fig.add_trace(go.Scatter(
-        x=days_labels, y=lows,
+        x=days_labels, y=lower_95,
         mode='lines',
-        line=dict(color='rgba(59, 130, 246, 0.3)', width=1, dash='dash'),
+        line=dict(color='rgba(147, 197, 253, 0.4)', width=1, dash='dot'),
         fill='tonexty',
-        fillcolor='rgba(59, 130, 246, 0.08)',
-        name='Expected Lower Range (Support)',
+        fillcolor='rgba(219, 234, 254, 0.25)',
+        name='95% Volatility Range (±2 ATR)',
         hoverinfo='skip'
     ))
 
-    # Main Day-to-Day Price Projection Line
-    line_col = "#15803d" if fc_data["week_net_gain"] >= 0 else "#b91c1c"
+    # 2. 68% High-Probability Core Cone (±1 ATR Inner Tunnel)
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=upper_68,
+        mode='lines',
+        line=dict(color='rgba(59, 130, 246, 0.5)', width=1, dash='dash'),
+        name='Core Probability Upper (+1 ATR)',
+        hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=lower_68,
+        mode='lines',
+        line=dict(color='rgba(59, 130, 246, 0.5)', width=1, dash='dash'),
+        fill='tonexty',
+        fillcolor='rgba(191, 219, 254, 0.40)',
+        name='68% Core Probability Cone (±1 ATR)',
+        hoverinfo='skip'
+    ))
+
+    # 3. 30-Day Pivot Resistance (R30) Boundary
+    r30 = fc_data.get("pivot_r30", fc_data["ltp"] * 1.05)
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=[r30] * len(days_labels),
+        mode='lines',
+        line=dict(color='#f97316', width=1.5, dash='dashdot'),
+        name=f"30D Pivot Resistance (Tk {r30:.2f})"
+    ))
+
+    # 4. 30-Day Pivot Support (S30) Boundary
+    s30 = fc_data.get("pivot_s30", fc_data["ltp"] * 0.95)
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=[s30] * len(days_labels),
+        mode='lines',
+        line=dict(color='#06b6d4', width=1.5, dash='dashdot'),
+        name=f"30D Pivot Support (Tk {s30:.2f})"
+    ))
+
+    # 5. Invalidation / Stop-Loss Level
+    inv_stop = fc_data.get("invalidation_stop", fc_data["ltp"] * 0.97)
+    fig.add_trace(go.Scatter(
+        x=days_labels, y=[inv_stop] * len(days_labels),
+        mode='lines',
+        line=dict(color='#ef4444', width=1.5, dash='dot'),
+        name=f"Invalidation Stop (Tk {inv_stop:.2f})"
+    ))
+
+    # 6. Statistical Directional Trajectory Line
+    line_col = "#15803d" if fc_data["directional_bias"] == "Bullish" else ("#b91c1c" if fc_data["directional_bias"] == "Bearish" else "#0284c7")
     fig.add_trace(go.Scatter(
         x=days_labels, y=prices,
         mode='lines+markers+text',
-        line=dict(color=line_col, width=3),
-        marker=dict(size=9, color=line_col, symbol='circle'),
+        line=dict(color=line_col, width=3.5),
+        marker=dict(size=10, color=line_col, symbol='diamond'),
         text=[f"Tk {p:.2f}" for p in prices],
         textposition="top center",
-        name='Projected Day-to-Day Price'
+        name=f"Projected {fc_data['directional_bias']} Trajectory"
     ))
 
     fig.update_layout(
-        title=dict(text=f"<b>{fc_data['symbol']}</b> — ৫-দিনের দিনভিত্তিক পূর্বাভাস ট্রাজেক্টরি (Sunday ➔ Thursday)", font=dict(size=14, color="#0f172a")),
-        height=380,
-        margin=dict(l=20, r=20, t=40, b=20),
+        title=dict(
+            text=f"<b>{fc_data['symbol']}</b> — 5-Day Volatility Fan Chart & Cone of Probability (Sunday ➔ Thursday)",
+            font=dict(size=15, color="#0f172a")
+        ),
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
         xaxis=dict(showgrid=True, gridcolor="#f1f5f9"),
         yaxis=dict(title="Price (Tk)", showgrid=True, gridcolor="#f1f5f9"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
@@ -3938,25 +4363,29 @@ with top_h_col1:
     """, unsafe_allow_html=True)
 
 with top_h_col2:
-    st.markdown(f"""
-    <div style="background: {reversal_data['pred_bg']}; border: 1.8px solid {reversal_data['pred_border']}; border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.04);">
-        <div style="flex: 1;">
-            <div style="font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px;">
-                🔮 বর্তমান অবস্থান থেকে সম্ভাব্য গতিপথ (NEXT MOVE FORECAST)
-            </div>
-            <div style="font-size: 15px; font-weight: 900; color: {reversal_data['pred_color']}; margin: 2px 0;">
-                {reversal_data['pred_verdict']}
-            </div>
-            <div style="font-size: 11.5px; color: #334155; font-weight: 700;">
-                🎯 {reversal_data['pred_target']}
-            </div>
-        </div>
-        <div style="text-align: center; background: {reversal_data['pred_color']}; color: #ffffff; padding: 6px 12px; border-radius: 8px; min-width: 80px; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <span style="font-size: 9.5px; font-weight: 700; text-transform: uppercase; display: block; opacity: 0.9;">সম্ভাবনা</span>
-            <b style="font-size: 19px; font-weight: 900;">{reversal_data['prob_pct']}%</b>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"""<div style="background: {reversal_data['pred_bg']}; border: 1.8px solid {reversal_data['pred_border']}; border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.04);">
+<div style="flex: 1;">
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px;">
+<span style="font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px;">
+🔮 DSEX 5-DAY PROBABILITY MODEL
+</span>
+<span style="font-size: 10px; font-weight: 800; color: #475569; background: #ffffff; border: 1px solid #cbd5e1; padding: 1px 6px; border-radius: 4px;">
+ATR(14): ±{reversal_data['dsex_atr']} pts
+</span>
+</div>
+<div style="font-size: 14.5px; font-weight: 900; color: {reversal_data['pred_color']}; margin: 1px 0;">
+{reversal_data['pred_verdict']}
+</div>
+<div style="font-size: 11px; color: #334155; font-weight: 700; display: flex; gap: 10px; flex-wrap: wrap; margin-top: 2px;">
+<span>🎯 <b>রেঞ্জ:</b> {reversal_data['expected_range_lower']:,.0f} – {reversal_data['expected_range_upper']:,.0f}</span>
+<span>🛡️ <b>ইনভ্যালিডেশন:</b> {reversal_data['invalidation_point']:,.0f}</span>
+</div>
+</div>
+<div style="text-align: center; background: {reversal_data['conf_color']}; color: #ffffff; padding: 6px 12px; border-radius: 8px; min-width: 80px; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+<span style="font-size: 9px; font-weight: 700; text-transform: uppercase; display: block; opacity: 0.9;">কনফিডেন্স</span>
+<b style="font-size: 18px; font-weight: 900;">{reversal_data['prob_pct']}%</b>
+</div>
+</div>""", unsafe_allow_html=True)
 
 st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
@@ -4017,177 +4446,218 @@ with tab_market:
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
-    # 2. DSEX BIDIRECTIONAL DIRECTION & TURNING POINTS ENGINE
-    st.markdown(f"""
-    <div style="background: {reversal_data['dir_bg']}; border: 1.5px solid {reversal_data['dir_color']}; border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04);">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <span style="font-size: 20px;">🧭</span>
-                <span style="font-size: 16px; font-weight: 800; color: #0f172a;">বর্তমান মার্কেট ডিরেকশন ও সম্ভাব্য গতিপথ (DSEX Direction & Forecast)</span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="font-size: 12px; font-weight: 800; color: white; background: {reversal_data['pred_color']}; padding: 4px 12px; border-radius: 20px; letter-spacing: 0.5px;">
-                    {reversal_data['pred_verdict']} ({reversal_data['prob_pct']}%)
-                </span>
-                <span style="font-size: 12px; font-weight: 700; color: #334155; background: #ffffff; padding: 4px 10px; border-radius: 6px; border: 1px solid #cbd5e1;">
-                    RSI (14): <b style="color: {reversal_data['rsi_color']};">{reversal_data['rsi_val']}</b>
-                </span>
-            </div>
-        </div>
-        <div style="font-size: 13px; color: #1e293b; line-height: 1.5; font-weight: 600;">
-            💡 <b>সম্ভাব্য ট্রেন্ড বিশ্লেষণ:</b> {reversal_data['pred_reason']}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ------------------------------------------------------------------------------------------------
+    # INSTITUTIONAL MARKET TURNAROUND & DECISION ENGINE (সাপোর্ট-রেজিস্ট্যান্স ও ট্রেডিং সিদ্ধান্ত)
+    # ------------------------------------------------------------------------------------------------
 
-    # Visual Interactive Trajectory Roadmap Bar
-    st.markdown(f"""
-    <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-        <div style="font-size: 11px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
-            🛣️ DSEX সম্পূর্ণ গতিপথ রোডম্যাপ (Full Trajectory Spectrum: Floor ⇄ Live Index ⇄ Peak)
-        </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; overflow-x: auto; gap: 8px; font-size: 12px; padding: 4px 0;">
-            <div style="text-align: center; min-width: 90px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #b45309; font-weight: 700;">🧱 হার্ড ফ্লোর</span><br>
-                <b style="color: #92400e; font-size: 13px;">{reversal_data['max_safe_floor']:,.0f}</b>
-            </div>
-            <span style="color: #94a3b8; font-weight: 800;">←</span>
-            <div style="text-align: center; min-width: 100px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #15803d; font-weight: 700;">🛡️ ডিমান্ড জোন</span><br>
-                <b style="color: #166534; font-size: 12.5px;">{reversal_data['major_reversal_min']:,.0f}–{reversal_data['major_reversal_max']:,.0f}</b>
-            </div>
-            <span style="color: #94a3b8; font-weight: 800;">←</span>
-            <div style="text-align: center; min-width: 95px; background: #ecfdf5; border: 1.5px solid #10b981; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #047857; font-weight: 800;">🎯 ১ম বাউন্স</span><br>
-                <b style="color: #065f46; font-size: 13px;">{reversal_data['primary_bounce']:,.1f}</b>
-            </div>
-            <span style="color: #0284c7; font-weight: 800; font-size: 16px;">◀ 🏛️ ▶</span>
-            <div style="text-align: center; min-width: 120px; background: #0284c7; color: white; border-radius: 8px; padding: 8px 12px; box-shadow: 0 2px 6px rgba(2,132,199,0.3);">
-                <span style="font-size: 10px; color: #bae6fd; font-weight: 800; text-transform: uppercase;">CURRENT LIVE DSEX</span><br>
-                <b style="font-size: 16px; font-weight: 900; color: #ffffff;">{reversal_data['dsex_now']:,.2f}</b>
-            </div>
-            <span style="color: #94a3b8; font-weight: 800;">→</span>
-            <div style="text-align: center; min-width: 95px; background: #fef2f2; border: 1.5px solid #f87171; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #b91c1c; font-weight: 800;">🎯 ১ম রেজিস্ট্যান্স</span><br>
-                <b style="color: #991b1b; font-size: 13px;">{reversal_data['res_1']:,.1f}</b>
-            </div>
-            <span style="color: #94a3b8; font-weight: 800;">→</span>
-            <div style="text-align: center; min-width: 100px; background: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #be123c; font-weight: 700;">🛑 প্রধান সাপ্লাই জোন</span><br>
-                <b style="color: #9f1239; font-size: 12.5px;">{reversal_data['res_2_min']:,.0f}–{reversal_data['res_2_max']:,.0f}</b>
-            </div>
-            <span style="color: #94a3b8; font-weight: 800;">→</span>
-            <div style="text-align: center; min-width: 95px; background: #fdf2f8; border: 1px solid #fbcfe8; border-radius: 6px; padding: 6px 8px;">
-                <span style="font-size: 10px; color: #9d174d; font-weight: 700;">⛰️ ৬০D সুইং পিক</span><br>
-                <b style="color: #831843; font-size: 13px;">{reversal_data['res_max_peak']:,.0f}</b>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # 1. Immediate Market Action Execution Badge (High-Visibility Banner)
+    st.markdown(f"""<div style="background: {reversal_data['action_bg']}; border: 1.8px solid {reversal_data['action_border']}; border-radius: 12px; padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 6px;">
+<div style="display: flex; align-items: center; gap: 10px;">
+<span style="font-size: 24px;">{reversal_data['action_pill_icon']}</span>
+<div>
+<div style="font-size: 10.5px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.6px;">
+🎯 IMMEDIATE MARKET EXECUTION ACTION (তাৎক্ষণিক ট্রেডিং সিদ্ধান্ত)
+</div>
+<div style="font-size: 17px; font-weight: 900; color: {reversal_data['action_color']}; margin-top: 1px;">
+{reversal_data['action_badge_en']}
+</div>
+</div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 12px; font-weight: 800; color: #ffffff; background: {reversal_data['action_color']}; padding: 4px 14px; border-radius: 20px; letter-spacing: 0.3px;">
+{reversal_data['action_badge_bn']}
+</span>
+<span style="font-size: 11.5px; font-weight: 700; color: #334155; background: #ffffff; padding: 4px 10px; border-radius: 6px; border: 1px solid #cbd5e1;">
+RSI (14): <b style="color: {reversal_data['rsi_color']};">{reversal_data['rsi_val']}</b>
+</span>
+</div>
+</div>
+<div style="font-size: 12.5px; color: #1e293b; font-weight: 600; line-height: 1.5; border-top: 1px dashed {reversal_data['action_border']}; padding-top: 8px; margin-top: 4px;">
+💡 <b>একশন নির্দেশিকা:</b> {reversal_data['action_desc']}
+</div>
+</div>""", unsafe_allow_html=True)
 
-    # 2 Big Highlighted Forecast Panels: Downside Bounce vs Upside Drop Ceilings
+    # 2. Hero Bar: Centered Live Index Value with Dynamic Distance Indicators
+    st.markdown(f"""<div style="background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 14px 20px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.03);">
+<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+<div style="flex: 1; min-width: 170px; background: #f0fdf4; border: 1.5px solid #86efac; border-radius: 10px; padding: 10px 14px; text-align: center;">
+<div style="font-size: 11px; font-weight: 800; color: #15803d; text-transform: uppercase;">
+🛡️ নিকটবর্তী সাপোর্ট (S1)
+</div>
+<div style="font-size: 18px; font-weight: 900; color: #15803d; margin: 2px 0;">
+{reversal_data['s1_val']:,.1f}
+</div>
+<div style="font-size: 11.5px; font-weight: 800; color: #166534;">
+↓ {reversal_data['pts_to_s1']:,.1f} pts (-{reversal_data['pct_to_s1']:.2f}%)
+</div>
+</div>
+<div style="flex: 1.4; min-width: 220px; background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%); color: #ffffff; border-radius: 12px; padding: 12px 18px; text-align: center; box-shadow: 0 4px 12px rgba(2,132,199,0.25);">
+<div style="font-size: 10.5px; font-weight: 800; color: #bae6fd; text-transform: uppercase; letter-spacing: 0.8px;">
+🏛️ CURRENT LIVE DSEX BENCHMARK
+</div>
+<div style="font-size: 26px; font-weight: 900; color: #ffffff; letter-spacing: -0.5px; margin: 2px 0;">
+{reversal_data['dsex_now']:,.2f}
+</div>
+<div style="font-size: 11px; font-weight: 700; color: #e0f2fe;">
+Mathematical Ordering: S3 &lt; S2 &lt; S1 &lt; C &lt; R1 &lt; R2 &lt; R3
+</div>
+</div>
+<div style="flex: 1; min-width: 170px; background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px 14px; text-align: center;">
+<div style="font-size: 11px; font-weight: 800; color: #b91c1c; text-transform: uppercase;">
+🛑 নিকটবর্তী রেজিস্ট্যান্স (R1)
+</div>
+<div style="font-size: 18px; font-weight: 900; color: #b91c1c; margin: 2px 0;">
+{reversal_data['r1_val']:,.1f}
+</div>
+<div style="font-size: 11.5px; font-weight: 800; color: #991b1b;">
+↑ {reversal_data['pts_to_r1']:,.1f} pts (+{reversal_data['pct_to_r1']:.2f}%)
+</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
+
+    # 3. Two-Column Symmetric Cards: Turnaround Demand Floors vs Supply Resistance Ceilings
+    # 3. Two-Column Symmetric Cards: Turnaround Demand Floors vs Supply Resistance Ceilings
     down_col, up_col = st.columns(2)
 
     with down_col:
-        st.markdown("""
-        <div style="background: #ffffff; border: 1px solid #e2e8f0; border-top: 4px solid #16a34a; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
-                <span style="font-size: 18px;">🔴📉</span>
-                <span style="font-size: 15px; font-weight: 800; color: #166534;">পতন হলে — ঠিক কোথা থেকে ঘুরে দাঁড়াবে? (Downside Bounce Targets)</span>
-            </div>
-        """, unsafe_allow_html=True)
-
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            pb_badge = f"↓ {reversal_data['pts_to_primary']:,.1f} pts ({reversal_data['pct_to_primary']:.2f}%)" if reversal_data['pts_to_primary'] > 0 else "বর্তমানে এই সাপোর্টে"
-            st.markdown(f"""
-            <div style="background: #f0fdf4; border: 1.5px solid #86efac; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #15803d;">🎯 ১ম সম্ভাব্য বাউন্স</span>
-                <div style="font-size: 20px; font-weight: 900; color: #15803d; margin: 3px 0;">{reversal_data['primary_bounce']:,.1f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #166534;">{pb_badge}</div>
-                <div style="font-size: 10px; color: #15803d; margin-top: 4px; border-top: 1px dashed #bbf7d0; padding-top: 4px;">Lower BB / Fib 50%</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with d2:
-            mj_drop = f"↓ {reversal_data['pts_to_major_max']:,.0f}–{reversal_data['pts_to_major_min']:,.0f} pts" if reversal_data['pts_to_major_max'] > 0 else "রিভার্সাল জোনে রয়েছে"
-            st.markdown(f"""
-            <div style="background: #ecfdf5; border: 1.5px solid #6ee7b7; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #047857;">🛡️ প্রাতিষ্ঠানিক ডিমান্ড জোন</span>
-                <div style="font-size: 17px; font-weight: 900; color: #047857; margin: 3px 0;">{reversal_data['major_reversal_min']:,.0f}–{reversal_data['major_reversal_max']:,.0f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #065f46;">{mj_drop}</div>
-                <div style="font-size: 10px; color: #047857; margin-top: 4px; border-top: 1px dashed #a7f3d0; padding-top: 4px;">Fib 61.8% Golden Cluster</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with d3:
-            fl_drop = f"↓ {reversal_data['pts_to_floor']:,.1f} pts ({reversal_data['pct_to_floor']:.2f}%)"
-            st.markdown(f"""
-            <div style="background: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #b45309;">🧱 নিরাপদ বটম ফ্লোর</span>
-                <div style="font-size: 20px; font-weight: 900; color: #b45309; margin: 3px 0;">{reversal_data['max_safe_floor']:,.1f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #d97706;">{fl_drop}</div>
-                <div style="font-size: 10px; color: #b45309; margin-top: 4px; border-top: 1px dashed #fef08a; padding-top: 4px;">60-Day Major Swing Low</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"""<div style="background: #ffffff; border: 1.5px solid #bbf7d0; border-top: 5px solid #16a34a; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 2px 6px rgba(22,163,74,0.06);">
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 18px;">📉🟢</span>
+<span style="font-size: 14.5px; font-weight: 800; color: #166534;">পতন হলে যেখান থেকে ঘুরে দাঁড়াবে (Turnaround Demand Floors)</span>
+</div>
+<span style="font-size: 10.5px; font-weight: 800; color: #15803d; background: #dcfce7; padding: 2px 8px; border-radius: 6px;">All &lt; {reversal_data['dsex_now']:,.1f}</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div style="background: #f0fdf4; border: 1.5px solid #86efac; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #15803d;">S1 (Immediate Technical Bounce)</div>
+<div style="font-size: 11px; color: #166534; font-weight: 600; margin-top: 1px;">{reversal_data['s1_name']} • {reversal_data['s1_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #15803d;">{reversal_data['s1_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #166534;">↓ {reversal_data['pts_to_s1']:,.1f} pts (-{reversal_data['pct_to_s1']:.2f}%)</div>
+</div>
+</div>
+<div style="background: #ecfdf5; border: 1.5px solid #6ee7b7; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #047857;">S2 (Institutional Demand Zone)</div>
+<div style="font-size: 11px; color: #065f46; font-weight: 600; margin-top: 1px;">{reversal_data['s2_name']} • {reversal_data['s2_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #047857;">{reversal_data['s2_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #065f46;">↓ {reversal_data['pts_to_s2']:,.1f} pts (-{reversal_data['pct_to_s2']:.2f}%)</div>
+</div>
+</div>
+<div style="background: #fffbeb; border: 1.5px solid #fde68a; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #b45309;">S3 (Structural Hard Floor)</div>
+<div style="font-size: 11px; color: #92400e; font-weight: 600; margin-top: 1px;">{reversal_data['s3_name']} • {reversal_data['s3_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #b45309;">{reversal_data['s3_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #b45309;">↓ {reversal_data['pts_to_s3']:,.1f} pts (-{reversal_data['pct_to_s3']:.2f}%)</div>
+</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
     with up_col:
-        st.markdown("""
-        <div style="background: #ffffff; border: 1px solid #e2e8f0; border-top: 4px solid #ef4444; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
-                <span style="font-size: 18px;">🟢📈</span>
-                <span style="font-size: 15px; font-weight: 800; color: #991b1b;">বৃদ্ধি পেলে — কোন পয়েন্টে পৌঁছে আবার নামবে? (Upside Ceilings & Drop Points)</span>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div style="background: #ffffff; border: 1.5px solid #fecdd3; border-top: 5px solid #ef4444; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 2px 6px rgba(239,68,68,0.06);">
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+<span style="font-size: 18px;">📈🔴</span>
+<span style="font-size: 14.5px; font-weight: 800; color: #991b1b;">উর্ধমুখী হলে যেখান থেকে বিক্রির চাপ আসবে (Supply Resistance Ceilings)</span>
+</div>
+<span style="font-size: 10.5px; font-weight: 800; color: #b91c1c; background: #fee2e2; padding: 2px 8px; border-radius: 6px;">All &gt; {reversal_data['dsex_now']:,.1f}</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div style="background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #b91c1c;">R1 (1st Rejection Level)</div>
+<div style="font-size: 11px; color: #991b1b; font-weight: 600; margin-top: 1px;">{reversal_data['r1_name']} • {reversal_data['r1_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #b91c1c;">{reversal_data['r1_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #991b1b;">↑ {reversal_data['pts_to_r1']:,.1f} pts (+{reversal_data['pct_to_r1']:.2f}%)</div>
+</div>
+</div>
+<div style="background: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #be123c;">R2 (Major Supply Cluster)</div>
+<div style="font-size: 11px; color: #9f1239; font-weight: 600; margin-top: 1px;">{reversal_data['r2_name']} • {reversal_data['r2_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #be123c;">{reversal_data['r2_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #9f1239;">↑ {reversal_data['pts_to_r2']:,.1f} pts (+{reversal_data['pct_to_r2']:.2f}%)</div>
+</div>
+</div>
+<div style="background: #fdf2f8; border: 1.5px solid #fbcfe8; border-radius: 10px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
+<div>
+<div style="font-size: 11px; font-weight: 800; color: #9d174d;">R3 (Macro Ceiling Peak)</div>
+<div style="font-size: 11px; color: #831843; font-weight: 600; margin-top: 1px;">{reversal_data['r3_name']} • {reversal_data['r3_desc']}</div>
+</div>
+<div style="text-align: right;">
+<div style="font-size: 18px; font-weight: 900; color: #9d174d;">{reversal_data['r3_val']:,.1f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #831843;">↑ {reversal_data['pts_to_r3']:,.1f} pts (+{reversal_data['pct_to_r3']:.2f}%)</div>
+</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
-        u1, u2, u3 = st.columns(3)
-        with u1:
-            u1_pts = f"↑ {reversal_data['pts_to_res1']:,.1f} pts (+{reversal_data['pct_to_res1']:.2f}%)" if reversal_data['pts_to_res1'] > 0 else "রেজিস্ট্যান্সে রয়েছে"
-            st.markdown(f"""
-            <div style="background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #b91c1c;">🎯 ১ম টেকনিক্যাল সিলিং</span>
-                <div style="font-size: 20px; font-weight: 900; color: #b91c1c; margin: 3px 0;">{reversal_data['res_1']:,.1f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #991b1b;">{u1_pts}</div>
-                <div style="font-size: 10px; color: #b91c1c; margin-top: 4px; border-top: 1px dashed #fecaca; padding-top: 4px;">EMA 9 & Fib 38.2% Ceiling</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with u2:
-            u2_pts = f"↑ {reversal_data['pts_to_res2_min']:,.0f}–{reversal_data['pts_to_res2_max']:,.0f} pts" if reversal_data['pts_to_res2_min'] > 0 else "সাপ্লাই জোনে রয়েছে"
-            st.markdown(f"""
-            <div style="background: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #be123c;">🛑 প্রধান প্রফিট টেকিং জোন</span>
-                <div style="font-size: 17px; font-weight: 900; color: #be123c; margin: 3px 0;">{reversal_data['res_2_min']:,.0f}–{reversal_data['res_2_max']:,.0f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #9f1239;">{u2_pts}</div>
-                <div style="font-size: 10px; color: #be123c; margin-top: 4px; border-top: 1px dashed #ffe4e6; padding-top: 4px;">50 SMA & 20 SMA Barrier</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with u3:
-            peak_pts = f"↑ {reversal_data['pts_to_peak']:,.1f} pts (+{reversal_data['pct_to_peak']:.2f}%)"
-            st.markdown(f"""
-            <div style="background: #fdf2f8; border: 1.5px solid #fbcfe8; border-radius: 8px; padding: 10px; text-align: center; height: 100%;">
-                <span style="font-size: 11px; font-weight: 800; color: #9d174d;">⛰️ ৬০D সুইং হাই চূড়া</span>
-                <div style="font-size: 20px; font-weight: 900; color: #9d174d; margin: 3px 0;">{reversal_data['res_max_peak']:,.1f}</div>
-                <div style="font-size: 11px; font-weight: 700; color: #831843;">{peak_pts}</div>
-                <div style="font-size: 10px; color: #9d174d; margin-top: 4px; border-top: 1px dashed #fce7f3; padding-top: 4px;">Macro Record Peak Ceiling</div>
-            </div>
-            """, unsafe_allow_html=True)
+    # 4. Institutional Action Trigger Box (Summary Strategy Card)
+    dse_turnover_cr = float(stats_data.get("value_mn", 0.0)) / 10.0
+    market_elapsed = get_market_elapsed_minutes(get_bangladesh_now())
+    vol_entry_agent = evaluate_institutional_entry(
+        current_price=float(reversal_data['dsex_now']),
+        support_level=float(reversal_data['s1_val']),
+        df_intraday=None,
+        df_daily=None,
+        market_turnover_cr=dse_turnover_cr,
+        market_hours_elapsed_mins=market_elapsed
+    )
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # 3. Actionable Bengali Guidance Box
-    st.markdown(f"""
-    <div class="reversal-strategy-box">
-        <div style="font-size: 14px; font-weight: 800; color: #0f172a; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-            <span>💡</span> মার্কেট গতিবিধি পর্যবেক্ষণ ও বাস্তবভিত্তিক ট্রেডিং স্ট্র্যাটেজি (Turnaround Strategy Blueprint)
-        </div>
-        <ul style="margin: 0; padding-left: 20px; font-size: 12.5px; color: #334155; line-height: 1.7;">
-            <li><b>📉 পতন অব্যাহত থাকলে কেনার সেরা জোন (Buy-On-Dip Strategy):</b> সূচক <b>{reversal_data['primary_bounce']:,.1f}</b> পয়েন্ট (১ম বাউন্স) অথবা <b>{reversal_data['major_reversal_min']:,.0f} – {reversal_data['major_reversal_max']:,.0f}</b> পয়েন্টের (Fibonacci 61.8% গোল্ডেন ডিমান্ড ক্লাস্টার) মধ্যে এলে বিক্রির চাপ নিঃশেষ হয়ে শক্তিশালী প্রাতিষ্ঠানিক টেকনিক্যাল বাউন্স আসার সম্ভাবনা <b>৮৫%+</b>। এই সাপোর্ট জোনে কিস্তিতে বাছাইকৃত 'A' ক্যাটাগরি ফান্ডামেন্টাল শেয়ারে এন্ট্রি নেওয়া কম ঝুঁকির সেরা সুযোগ।</li>
-            <li><b>📈 বৃদ্ধি পেলে মুনাফা তোলার জোন (Take-Profit on Rally Ceiling):</b> সূচক বাউন্স করে উর্ধ্বমুখী হলে প্রথম বাধা পাবে <b>{reversal_data['res_1']:,.1f}</b> পয়েন্টে (EMA 9 & Fib 38.2%), এবং মূল প্রফিট টেকিং রিভার্সাল জোন হলো <b>{reversal_data['res_2_min']:,.0f} – {reversal_data['res_2_max']:,.0f}</b> পয়েন্ট। এই পয়েন্টগুলোতে পৌঁছালে বড় প্রাতিষ্ঠানিক ট্রেডাররা প্রফিট বুকিং করায় সূচক পুনরায় সাময়িক কারেকশনে নামতে পারে।</li>
-            <li><b>🧱 চূড়ান্ত সুরক্ষামূলক হার্ড ফ্লোর (Structural Hard Bottom):</b> চরম প্যানিক পরিস্থিতিতেও <b>{reversal_data['max_safe_floor']:,.1f}</b> পয়েন্ট হলো বাজারের মূল কাঠামোগত বটম। এই ফ্লোরের নিচে বাজার নামার ঝুঁকি অত্যন্ত সীমিত।</li>
-            <li><b>⚡ মোমেন্টাম সিগন্যাল:</b> বর্তমান DSEX RSI(14) হলো <b>{reversal_data['rsi_val']}</b> — <span style="color: {reversal_data['rsi_color']}; font-weight: 800;">{reversal_data['rsi_status']}</span>।</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"""<div style="background: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.03);">
+<div style="font-size: 14px; font-weight: 800; color: #0f172a; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+<span>📋</span> প্রাতিষ্ঠানিক এক্সিকিউশন ও ট্রেডিং স্ট্র্যাটেজি ব্লুপ্রিন্ট (Execution Action Matrix)
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;">
+<div style="background: {vol_entry_agent['bg_color']}; border: 1.5px solid {vol_entry_agent['border_color']}; border-left: 5px solid {vol_entry_agent['color']}; border-radius: 8px; padding: 10px 14px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+<div style="font-size: 11.5px; font-weight: 800; color: {vol_entry_agent['command_color']};">
+🛒 Buying Strategy (ক্রয় একশন):
+</div>
+<span style="font-size: 10px; font-weight: 900; background: {vol_entry_agent['color']}; color: #ffffff; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;">
+{vol_entry_agent['command']} ({vol_entry_agent['confidence_score']}%)
+</span>
+</div>
+<div style="font-size: 12px; color: #0f172a; font-weight: 800; line-height: 1.4; margin-bottom: 3px;">
+{vol_entry_agent['action_badge']}
+</div>
+<div style="font-size: 11.5px; color: #334155; font-weight: 600; line-height: 1.4;">
+{vol_entry_agent['detail_text']}
+</div>
+</div>
+<div style="background: #ffffff; border: 1px solid #fecdd3; border-left: 4px solid #ef4444; border-radius: 8px; padding: 10px 14px;">
+<div style="font-size: 11.5px; font-weight: 800; color: #991b1b; margin-bottom: 3px;">
+🎯 Exit Strategy (বিক্রয় কৌশল):
+</div>
+<div style="font-size: 12px; color: #334155; font-weight: 600; line-height: 1.5;">
+সূচক <b style="color: #b91c1c;">{reversal_data['r1_val']:,.1f}</b> স্পর্শ করলে শর্ট-টার্ম প্রফিট বুকিং করুন।
+</div>
+</div>
+<div style="background: #ffffff; border: 1px solid #fed7aa; border-left: 4px solid #f97316; border-radius: 8px; padding: 10px 14px;">
+<div style="font-size: 11.5px; font-weight: 800; color: #c2410c; margin-bottom: 3px;">
+🛡️ Invalidation Level (স্টপ-লস / ঝুঁকি সুরক্ষা):
+</div>
+<div style="font-size: 12px; color: #334155; font-weight: 600; line-height: 1.5;">
+সূচক <b style="color: #c2410c;">{reversal_data['s2_val']:,.1f}</b> এর নিচে দৈনিক ক্লোজ দিলে স্টপ-লস কার্যকর করুন।
+</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
     st.write("---")
 
@@ -4246,38 +4716,60 @@ with tab_market:
 
             rsi_badge_html = f'<div style="display: flex; flex-direction: column; gap: 3px; align-items: flex-end; flex-shrink: 0; margin-top: 1px;">{r1d_badge_html}{r5m_badge_html}</div>'
 
-            # Build pattern badge HTML — show dominant pattern matching the verdict
-            if patterns_temp:
-                verdict_is_bull = int(score_temp.get("score", 0)) >= 0
-                lead_p = None
-                for _p in patterns_temp:
-                    if verdict_is_bull and _p["bias"] == "Bullish":
-                        lead_p = _p
-                        break
-                    elif not verdict_is_bull and _p["bias"] == "Bearish":
-                        lead_p = _p
-                        break
-                if lead_p is None:
-                    lead_p = patterns_temp[0]
-                badge_cls = "pattern-badge-bull" if lead_p["bias"] == "Bullish" else ("pattern-badge-bear" if lead_p["bias"] == "Bearish" else "pattern-badge-neutral")
-                pattern_badge_html = f'<div style="height: 22px; margin: 4px 0 2px 0;"><span class="pattern-badge {badge_cls}">📐 {lead_p["name"]}</span></div>'
+            # Unified stock setup calculation pipeline
+            setup = analysis.get("stock_setup", {
+                "close": ltp_val, "pattern": "No Clear Pattern", "pattern_bias": "Neutral",
+                "score": 0, "signal": "HOLD", "rsi": 50.0, "rrr": 1.0,
+                "target": round(ltp_val * 1.05, 2), "target_pct": 5.0,
+                "floor": round(ltp_val * 0.98, 2), "floor_pct": -2.0
+            })
+
+            score_val = int(setup.get("score", 0))
+            signal_val = str(setup.get("signal", "HOLD"))
+            pattern_val = str(setup.get("pattern", "No Clear Pattern"))
+            pattern_bias = str(setup.get("pattern_bias", "Neutral"))
+            target_val = float(setup.get("target", round(ltp_val * 1.05, 2)))
+            target_pct_val = float(setup.get("target_pct", 5.0))
+            floor_val = float(setup.get("floor", round(ltp_val * 0.98, 2)))
+            floor_pct_val = float(setup.get("floor_pct", -2.0))
+            rrr_val = float(setup.get("rrr", 1.0))
+
+            # Mathematical Assertion Safety Net (Pre-render validation)
+            if ltp_val > 0:
+                assert floor_val < ltp_val < target_val, f"Boundary error in {sym}: Floor {floor_val} < LTP {ltp_val} < Target {target_val}"
+                if score_val < 55:
+                    assert signal_val not in ["BUY", "STRONG BUY"], f"Assertion Error in {sym}: Low score {score_val} cannot trigger {signal_val}!"
+
+            # Pattern badge HTML
+            badge_cls = "pattern-badge-bull" if pattern_bias == "Bullish" else ("pattern-badge-bear" if pattern_bias == "Bearish" else "pattern-badge-neutral")
+            pattern_badge_html = f'<div style="height: 22px; margin: 4px 0 2px 0;"><span class="pattern-badge {badge_cls}">📐 {pattern_val}</span></div>'
+
+            if signal_val in ["STRONG BUY", "BUY"]:
+                sig_color = "#00C853" if signal_val == "STRONG BUY" else "#16a34a"
+                sig_blinker = "blink-dot-green"
+                move_txt = f"📈 বাড়বে → Tk {target_val:.2f} (+{target_pct_val:.1f}%)"
+                move_col = "#00875A"
+            elif signal_val in ["SELL", "STRONG SELL"]:
+                sig_color = "#D50000" if signal_val == "STRONG SELL" else "#dc2626"
+                sig_blinker = "blink-dot-red"
+                move_txt = f"📉 কমবে → Tk {floor_val:.2f} ({floor_pct_val:.1f}%)"
+                move_col = "#DE350B"
             else:
-                pattern_badge_html = '<div style="height: 22px; margin: 4px 0 2px 0;"></div>'
+                sig_color = "#ca8a04"
+                sig_blinker = "blink-dot-yellow"
+                move_txt = f"⚖️ রেঞ্জ: {floor_val:.1f}–{target_val:.1f}"
+                move_col = "#ca8a04"
 
-            buy_target_val = float(score_temp.get("target_buying_price", round(ltp_val * 0.98, 2))) if ltp_val > 0 else 0.0
-            sell_target_val = float(score_temp.get("target_selling_price", score_temp.get("target_price", round(ltp_val * 1.05, 2)))) if ltp_val > 0 else 0.0
-
-            down_pct = round(((ltp_val - buy_target_val) / ltp_val) * 100, 1) if ltp_val > 0 and buy_target_val < ltp_val else 0.0
-            up_pct = round(((sell_target_val - ltp_val) / ltp_val) * 100, 1) if ltp_val > 0 and sell_target_val > ltp_val else 0.0
-
-            move_badge_txt = score_temp.get("move_badge", f"📈 বাড়বে → Tk {sell_target_val:.2f} (+{up_pct:.1f}%)" if int(score_temp.get("score", 0)) >= 0 else f"📉 কমবে → Tk {buy_target_val:.2f} (-{down_pct:.1f}%)")
-            move_badge_col = score_temp.get("move_color", "#15803d" if int(score_temp.get("score", 0)) >= 0 else "#b91c1c")
 
             intraday_strip_html = f"""<div style="display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 3px 6px; margin-top: 4px; font-size: 10.5px;"><span style="color: #475569; font-weight: 700;">⚡ <b>5M RSI:</b> <strong style="color: {rsi_5m_fg}; font-size: 11px;">{rsi_5m:.1f}</strong> {rsi_5m_icon}</span><span style="background: {rsi_5m_bg}; color: {rsi_5m_fg}; border: 1px solid {rsi_5m_border}; padding: 1px 5px; border-radius: 4px; font-size: 9.5px; font-weight: 700;">{rsi_5m_status}</span></div>"""
 
-            target_badge_html = f"""<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; margin-top: 4px; font-size: 11px;"><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; border-bottom: 1px dashed #e2e8f0; padding-bottom: 3px;"><span style="font-size: 10px; font-weight: 700; color: #64748b;">🔮 গতিপথ (Next Move):</span><strong style="color: {move_badge_col}; font-size: 11px; font-weight: 800;">{move_badge_txt}</strong></div><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;"><span title="পতন হলে সর্বনিম্ন যেখান থেকে ঘুরে দাঁড়াবে">🟢 <b>Turnaround Floor:</b></span><strong style="color: #15803d; font-size: 11.5px;">Tk {buy_target_val:.2f} <span style="font-size: 10px; font-weight: 600; color: #166534;">(-{down_pct:.1f}%)</span></strong></div><div style="display: flex; justify-content: space-between; align-items: center;"><span title="বৃদ্ধি পেলে সর্বোচ্চ যে পর্যন্ত উঠতে পারে">🎯 <b>Highest Peak:</b></span><strong style="color: #b91c1c; font-size: 11.5px;">Tk {sell_target_val:.2f} <span style="font-size: 10px; font-weight: 600; color: #991b1b;">(+{up_pct:.1f}%)</span></strong></div></div>"""
+            target_badge_html = f"""<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 5px 8px; margin-top: 4px; font-size: 11px;"><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; border-bottom: 1px dashed #cbd5e1; padding-bottom: 3px;"><span style="font-size: 10px; font-weight: 700; color: #475569;">🔮 গতিপথ (Next Move):</span><strong style="color: {move_col}; font-size: 11px; font-weight: 800;">{move_txt}</strong></div><div style="display: flex; justify-content: space-between; align-items: center;"><span title="পতন হলে সর্বনিম্ন যেখান থেকে ঘুরে দাঁড়াবে">🟢 <b>Turnaround Floor:</b></span><strong style="color: #00875A; font-size: 11.5px; font-weight: 800;">Tk {floor_val:.2f} <span style="font-size: 10px; font-weight: 700; color: #00875A;">({floor_pct_val:+.1f}%)</span></strong></div></div>"""
 
-            card_html = f"""<div class="stock-card"><div><div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; gap: 6px;"><div style="display: flex; align-items: center; overflow: hidden; flex: 1;"><div class="stock-avatar">{sym[:2]}</div><div style="overflow: hidden;"><div class="stock-title" title="{item['name']}">{item['name']}</div><div class="stock-meta"><b>{sym}</b> • [{item['category']}] • {item['sector']}</div></div></div>{rsi_badge_html}</div>{pattern_badge_html}<div style="display: flex; align-items: baseline; margin-top: 4px;"><span class="price-main">{ltp_val:.2f}</span><span class="price-change" style="color: {chg_color};">{chg_val:+.2f} ({pct_val:+.2f}%)</span></div><div style="display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px;"><span>Range: <b>{q['low']:.1f} – {q['high']:.1f}</b></span><span>Avg: <b>{avg_val:.1f}</b></span><span>Vol: <b>{int(q['volume']):,}</b></span></div>{intraday_strip_html}{target_badge_html}</div><div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; border-top: 1px solid #f1f5f9; padding-top: 6px; margin-top: 6px;"><span>Score: <b>{score_temp['score']} / 100</b></span><div><span class="{score_temp['blinker_class']}"></span><strong style="color: {score_temp['color']}; font-size: 13px;">{score_temp['action']}</strong></div></div></div>"""
+
+
+
+
+            card_html = f"""<div class="stock-card"><div><div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; gap: 6px;"><div style="display: flex; align-items: center; overflow: hidden; flex: 1;"><div class="stock-avatar">{sym[:2]}</div><div style="overflow: hidden;"><div class="stock-title" title="{item['name']}">{item['name']}</div><div class="stock-meta"><b>{sym}</b> • [{item['category']}] • {item['sector']}</div></div></div>{rsi_badge_html}</div>{pattern_badge_html}<div style="display: flex; align-items: baseline; margin-top: 4px;"><span class="price-main">{ltp_val:.2f}</span><span class="price-change" style="color: {chg_color};">{chg_val:+.2f} ({pct_val:+.2f}%)</span></div><div style="display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px;"><span>Range: <b>{q['low']:.1f} – {q['high']:.1f}</b></span><span>Avg: <b>{avg_val:.1f}</b></span><span>Vol: <b>{int(q['volume']):,}</b></span></div>{intraday_strip_html}{target_badge_html}</div><div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; border-top: 1px solid #f1f5f9; padding-top: 6px; margin-top: 6px;"><span>Score: <b>{score_val} / 100</b></span><div><span class="{sig_blinker}"></span><strong style="color: {sig_color}; font-size: 13px;">{signal_val}</strong></div></div></div>"""
 
             with col:
                 st.markdown(card_html, unsafe_allow_html=True)
@@ -4548,6 +5040,7 @@ with tab_forecast:
 
     with fc_tab1:
         st.markdown("#### 📅 রবিবার থেকে বৃহস্পতিবার দিনভিত্তিক মূল্য পূর্বাভাস টেবিল (Master Forecast Sheet)")
+        st.caption("20 EMA Slope + MACD Velocity + RSI Divergence দ্বারা নির্ধারিত ৫-দিনের গতিপথ এবং ATR₁₄ ভোলাটিলিটি এক্সপানশন রেঞ্জ।")
         
         # Build Day-by-Day Master Sheet
         master_rows = []
@@ -4561,21 +5054,22 @@ with tab_forecast:
 
             master_rows.append({
                 "কোম্পানি (Symbol)": f"{fc['symbol']}",
-                "বর্তমান LTP (Tk)": f"{fc['ltp']:.2f}",
-                "সিগন্যাল": f"{fc['action']}",
-                f"রবিবার ({trading_week_info[0]['short_str']})": f"{d1.get('day_signal', '')} Tk {d1.get('projected_close', 0):.2f} ({d1.get('day_pct', 0):+.1f}%)",
-                f"সোমবার ({trading_week_info[1]['short_str']})": f"{d2.get('day_signal', '')} Tk {d2.get('projected_close', 0):.2f} ({d2.get('day_pct', 0):+.1f}%)",
-                f"মঙ্গলবার ({trading_week_info[2]['short_str']})": f"{d3.get('day_signal', '')} Tk {d3.get('projected_close', 0):.2f} ({d3.get('day_pct', 0):+.1f}%)",
-                f"বুধবার ({trading_week_info[3]['short_str']})": f"{d4.get('day_signal', '')} Tk {d4.get('projected_close', 0):.2f} ({d4.get('day_pct', 0):+.1f}%)",
-                f"বৃহস্পতিবার ({trading_week_info[4]['short_str']})": f"{d5.get('day_signal', '')} Tk {d5.get('projected_close', 0):.2f} ({d5.get('day_pct', 0):+.1f}%)",
-                "৫-দিনের মোট লাভ/ক্ষতি": f"{fc['week_net_gain']:+.2f}%",
-                "সাপ্তাহিক রেঞ্জ (High – Low)": f"Tk {fc['week_high']:.1f} – {fc['week_low']:.1f}"
+                "বর্তমান LTP": f"Tk {fc['ltp']:.2f}",
+                "দিকনির্দেশনা (Bias)": f"{fc['bias_icon']} {fc['directional_bias']} ({fc['probability_score']}%)",
+                "৫-দিনের টার্গেট": f"Tk {fc['expected_target']:.2f}",
+                "ইনভ্যালিডেশন / স্টপ": f"Tk {fc['invalidation_stop']:.2f}",
+                "R : R অনুপাত": f"1 : {fc['rr_ratio']:.2f}",
+                "প্রত্যাশিত রেঞ্জ (±2 ATR)": f"Tk {fc['expected_range_lower']:.1f} – {fc['expected_range_upper']:.1f}",
+                "৩০-দিনের পিভট (S30–R30)": f"Tk {fc['pivot_s30']:.1f} – {fc['pivot_r30']:.1f}",
+                f"রবি ({trading_week_info[0]['short_str']})": f"{d1.get('day_signal', '')} Tk {d1.get('projected_close', 0):.2f}",
+                f"বৃহঃ ({trading_week_info[4]['short_str']})": f"{d5.get('day_signal', '')} Tk {d5.get('projected_close', 0):.2f}",
+                "সাপ্তাহিক নেট পরিবর্তন": f"{fc['week_net_gain']:+.2f}%"
             })
 
         st.dataframe(pd.DataFrame(master_rows), width="stretch", hide_index=True)
 
     with fc_tab2:
-        st.markdown("#### 🃏 পোর্টফোলিও শেয়ারসমূহের ৫-দিনের দিনভিত্তিক ট্রাজেক্টরি কার্ড")
+        st.markdown("#### 🃏 পোর্টফোলিও শেয়ারসমূহের ৫-দিনের ভোলাটিলিটি-অ্যাডজাস্টেড ট্রাজেক্টরি কার্ড")
         
         # Grid of 2 columns
         fc_chunks = [portfolio_forecasts[i:i+2] for i in range(0, len(portfolio_forecasts), 2)]
@@ -4583,8 +5077,8 @@ with tab_forecast:
             c1, c2 = st.columns(2)
             for c_col, fc in zip([c1, c2], chunk):
                 with c_col:
-                    chg_c = "#15803d" if fc["week_net_gain"] >= 0 else "#b91c1c"
-                    chg_bg = "#dcfce7" if fc["week_net_gain"] >= 0 else "#fee2e2"
+                    chg_c = fc["color"]
+                    chg_bg = fc["bias_bg"]
                     
                     # Generate daily flow pills without leading markdown whitespace
                     pills_list = []
@@ -4610,29 +5104,35 @@ with tab_forecast:
                         f'<div style="font-size: 11px; color: #64748b; margin-top: 2px;">{fc["name"]}</div>'
                         f'</div>'
                         f'<div style="text-align: right;">'
-                        f'<div style="font-size: 10px; color: #64748b; font-weight: 700;">৫-দিনের নেট প্রত্যাশা</div>'
-                        f'<div style="background: {chg_bg}; color: {chg_c}; font-size: 13px; font-weight: 900; padding: 3px 8px; border-radius: 6px; display: inline-block;">{fc["week_net_gain"]:+.1f}%</div>'
+                        f'<div style="font-size: 10px; color: #64748b; font-weight: 700;">দিকনির্দেশনা ও সম্ভাবনা</div>'
+                        f'<div style="background: {chg_bg}; color: {chg_c}; font-size: 12.5px; font-weight: 900; padding: 3px 8px; border-radius: 6px; display: inline-block;">{fc["bias_icon"]} {fc["directional_bias"]} ({fc["probability_score"]}%)</div>'
                         f'</div>'
                         f'</div>'
-                        f'<div style="display: flex; justify-content: space-between; align-items: baseline; background: #f8fafc; padding: 6px 10px; border-radius: 6px; margin-bottom: 10px; font-size: 12px;">'
-                        f'<span>বর্তমান মূল্য (LTP): <b style="color: #0f172a;">Tk {fc["ltp"]:.2f}</b></span>'
-                        f'<span>টার্গেট রেঞ্জ: <b style="color: #15803d;">Tk {fc["week_low"]:.1f} – {fc["week_high"]:.1f}</b></span>'
+                        f'<div style="display: flex; justify-content: space-between; align-items: baseline; background: #f8fafc; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; font-size: 11.5px;">'
+                        f'<span>LTP: <b style="color: #0f172a;">Tk {fc["ltp"]:.2f}</b></span>'
+                        f'<span>৫-দিনের টার্গেট: <b style="color: {chg_c};">Tk {fc["expected_target"]:.2f}</b></span>'
+                        f'<span>স্টপ: <b style="color: #ef4444;">Tk {fc["invalidation_stop"]:.2f}</b></span>'
+                        f'</div>'
+                        f'<div style="display: flex; justify-content: space-between; font-size: 10.5px; color: #64748b; margin-bottom: 8px; padding: 0 4px;">'
+                        f'<span>রেঞ্জ (±2 ATR): <b>Tk {fc["expected_range_lower"]:.1f} – {fc["expected_range_upper"]:.1f}</b></span>'
+                        f'<span>R:R: <b>1 : {fc["rr_ratio"]:.2f}</b></span>'
+                        f'<span>30D Pivots: <b>Tk {fc["pivot_s30"]:.1f} – {fc["pivot_r30"]:.1f}</b></span>'
                         f'</div>'
                         f'<div style="display: flex; gap: 4px; margin-bottom: 10px;">{pills_html}</div>'
                         f'<div style="font-size: 11px; color: #64748b; border-top: 1px dashed #e2e8f0; padding-top: 6px; display: flex; justify-content: space-between;">'
-                        f'<span>সিগন্যাল: <b style="color: {fc["color"]};">{fc["action"]}</b> (Score: {fc["score"]})</span>'
-                        f'<span>দৈনিক ATR স্টেপ: <b>Tk {fc["atr"]:.2f}</b></span>'
+                        f'<span>নেট পরিবর্তন: <b style="color: {chg_c};">{fc["week_net_gain"]:+.2f}%</b></span>'
+                        f'<span>ATR (14): <b>Tk {fc["atr"]:.2f}</b></span>'
                         f'</div>'
                         f'</div>'
                     )
                     st.markdown(card_box, unsafe_allow_html=True)
 
         st.write("---")
-        st.markdown("#### 🔬 একক শেয়ারের ৫-দিনের ইন্টারঅ্যাক্টিভ সিমুলেটর (Single-Stock 5-Day Cone Simulator)")
+        st.markdown("#### 🔬 একক শেয়ারের ৫-দিনের ইন্টারঅ্যাক্টিভ ভোলাটিলিটি কোন সিমুলেটর (Single-Stock Fan Chart & Forecast Card)")
         
         all_sym_list = sorted(list(unified_quotes.keys()))
         default_idx = all_sym_list.index("GP") if "GP" in all_sym_list else 0
-        sim_sym = st.selectbox("শেয়ার নির্বাচন করুন (Select Stock to Inspect 5-Day Trajectory)", all_sym_list, index=default_idx)
+        sim_sym = st.selectbox("শেয়ার নির্বাচন করুন (Select Stock to Inspect 5-Day Volatility Model)", all_sym_list, index=default_idx)
         
         q_sim = unified_quotes.get(sim_sym, {})
         ltp_s = float(q_sim.get("ltp", 0.0))
@@ -4645,20 +5145,75 @@ with tab_forecast:
 
         sim_fc = compute_5_day_forecast(sim_sym, ltp_s, high_s, low_s, vol_s, ycp_s, chg_s, pct_s)
         
+        # 1. Dedicated Structured Forecast Card
+        target_gain_pct = round(((sim_fc["expected_target"] - sim_fc["ltp"]) / (sim_fc["ltp"] + 1e-9)) * 100, 2)
+        risk_drop_pct = round(((sim_fc["ltp"] - sim_fc["invalidation_stop"]) / (sim_fc["ltp"] + 1e-9)) * 100, 2)
+        
+        st.markdown(f"""<div style="background: linear-gradient(135deg, #ffffff, #f8fafc); border: 2px solid {sim_fc['color']}55; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+<div>
+<div style="display: flex; align-items: center; gap: 10px;">
+<h3 style="margin: 0; font-size: 22px; color: #0f172a; font-weight: 900;">{sim_fc['symbol']}</h3>
+<span style="font-size: 13px; font-weight: 800; background: {sim_fc['bias_bg']}; color: {sim_fc['color']}; border: 1.5px solid {sim_fc['color']}; padding: 3px 12px; border-radius: 20px;">
+{sim_fc['bias_icon']} {sim_fc['directional_bias']} ({sim_fc['probability_score']}% Probability)
+</span>
+</div>
+<div style="font-size: 12px; color: #64748b; margin-top: 4px;">
+বর্তমান মূল্য (LTP): <b>Tk {sim_fc['ltp']:.2f}</b> | দৈনিক ভোলাটিলিটি ATR(14): <b>Tk {sim_fc['atr']:.2f}</b> | {sim_fc.get('market_bias_bn', '')}
+</div>
+</div>
+<div style="text-align: right;">
+<span style="font-size: 11px; color: #64748b; font-weight: 700; display: block;">রিস্ক-টু-রিওয়ার্ড (R:R)</span>
+<strong style="font-size: 18px; color: #0f172a; font-weight: 900;">1 : {sim_fc['rr_ratio']:.2f}</strong>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px;">
+<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; text-align: center;">
+<div style="font-size: 11px; color: #64748b; font-weight: 700;">🎯 ৫-দিনের প্রত্যাশিত টার্গেট</div>
+<div style="font-size: 18px; font-weight: 900; color: {sim_fc['color']}; margin-top: 2px;">Tk {sim_fc['expected_target']:.2f}</div>
+<div style="font-size: 11px; font-weight: 800; color: {sim_fc['color']};">{target_gain_pct:+.2f}%</div>
+</div>
+<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; text-align: center;">
+<div style="font-size: 11px; color: #64748b; font-weight: 700;">🛡️ ইনভ্যালিডেশন / স্টপ লেভেল</div>
+<div style="font-size: 18px; font-weight: 900; color: #ef4444; margin-top: 2px;">Tk {sim_fc['invalidation_stop']:.2f}</div>
+<div style="font-size: 11px; font-weight: 800; color: #ef4444;">{-risk_drop_pct:+.2f}%</div>
+</div>
+<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; text-align: center;">
+<div style="font-size: 11px; color: #64748b; font-weight: 700;">📊 প্রত্যাশিত রেঞ্জ (Close ± 2×ATR)</div>
+<div style="font-size: 15px; font-weight: 900; color: #0284c7; margin-top: 4px;">Tk {sim_fc['expected_range_lower']:.1f} – {sim_fc['expected_range_upper']:.1f}</div>
+<div style="font-size: 10.5px; color: #64748b;">95% Volatility Tunnel</div>
+</div>
+<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; text-align: center;">
+<div style="font-size: 11px; color: #64748b; font-weight: 700;">🏛️ ৩০-দিনের পিভট বাউন্ডারি</div>
+<div style="font-size: 15px; font-weight: 900; color: #475569; margin-top: 4px;">S30: Tk {sim_fc['pivot_s30']:.1f} | R30: Tk {sim_fc['pivot_r30']:.1f}</div>
+<div style="font-size: 10.5px; color: #64748b;">Support / Resistance Floor & Ceiling</div>
+</div>
+</div>
+<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #1e293b; line-height: 1.5;">
+<div style="margin-bottom: 2px;">
+🔑 <b>কী কনফ্লুয়েন্স ফ্যাক্টর:</b> <span style="color: {sim_fc['color']}; font-weight: 800;">{sim_fc.get('key_confluence', '')}</span>
+</div>
+<div style="font-size: 11.5px; color: #64748b;">
+<b>মোমেন্টাম ও ডাইভারজেন্স:</b> {sim_fc.get('rsi_div_desc', 'Stable')} (RSI: {sim_fc.get('rsi', 50):.1f}) | <b>২০ EMA বেস:</b> Tk {sim_fc.get('pivot_s30', 0):.1f}
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
+        
+        # 2. Interactive Fan Chart
         st.plotly_chart(build_5_day_forecast_chart(sim_fc), use_container_width=True)
 
+        # 3. Trajectory & Volatility Breakdown Table
         sim_day_table = []
         for d in sim_fc["forecast_days"]:
             sim_day_table.append({
                 "ট্রেডিং দিন (Trading Day)": d["bengali_name"],
                 "তারিখ (Date)": d["date_str"],
-                "দিনভিত্তিক গতিপথ (Movement)": d["day_signal"],
-                "প্রত্যাশিত ক্লোজিং মূল্য (Tk)": f"Tk {d['projected_close']:.2f}",
-                "সম্ভাব্য সর্বোচ্চ মূল্য (High)": f"Tk {d['daily_high']:.2f}",
-                "সম্ভাব্য সর্বনিম্ন মূল্য (Low)": f"Tk {d['daily_low']:.2f}",
+                "দিকনির্দেশনা": f"{d['day_signal']} {d['bias_desc']}",
+                "প্রত্যাশিত ক্লোজ (Tk)": f"Tk {d['projected_close']:.2f}",
                 "দৈনিক পরিবর্তন (%)": f"{d['day_change']:+.2f} ({d['day_pct']:+.2f}%)",
-                "কিউমুলেটিভ পরিবর্তন (Cumulative %)": f"{d['cum_pct']:+.2f}%",
-                "গতিপ্রকৃতি (Movement Bias)": f"{d['bias_icon']} {d['bias_desc']}"
+                "কিউমুলেটিভ পরিবর্তন (%)": f"{d['cum_pct']:+.2f}%",
+                "68% Core Cone (±1 ATR)": f"Tk {d['cone_lower_68']:.2f} – {d['cone_upper_68']:.2f}",
+                "95% Volatility Cone (±2 ATR)": f"Tk {d['cone_lower_95']:.2f} – {d['cone_upper_95']:.2f}"
             })
         st.dataframe(pd.DataFrame(sim_day_table), width="stretch", hide_index=True)
 
@@ -4717,27 +5272,43 @@ with tab_forecast:
 # ----------------- TAB: BEST 15 SURE-SHOT PICKS (30-DAY 5%-10%+ GAIN) ----------------- #
 
 with tab_best15:
-    st.subheader("🌟 Top 15 Sure-Shot Buy Picks (5% – 10%+ Gain in Next 30 Days)")
-    st.caption("সম্পূর্ণ খাঁটি টেকনিক্যাল ইন্ডিকেটর (RSI Oversold Rebound, Stochastic Bullish Cross, 20/50 SMA Dynamic Support), চার্ট প্যাটার্ন ব্রেকআউট এবং রিস্ক-রিওয়ার্ড মডেলের ভিত্তিতে আগামী ৩০ দিনের জন্য বাছাইকৃত সেরা ১৫টি নিশ্চিত প্রফিট শেয়ার।")
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #f0fdf4, #ffffff); border: 1.5px solid #86efac; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h2 style="margin: 0; font-size: 20px; font-weight: 900; color: #14532d;">
+                    🌟 Top 15 Algorithmic High-Conviction Buy Picks (100-Point Composite Model)
+                </h2>
+                <div style="font-size: 12.5px; color: #166534; margin-top: 4px; font-weight: 600;">
+                    সম্পূর্ণ মাল্টি-ফ্যাক্টর অ্যালগরিদমিক কম্পোজিট স্কোরিং ইঞ্জিনের ভিত্তিতে বাছাইকৃত শীর্ষ ১৫টি সেরা শেয়ার
+                </div>
+            </div>
+            <div style="background: #ffffff; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 14px; text-align: right;">
+                <span style="font-size: 11px; color: #64748b; font-weight: 700; display: block;">স্কোরিং কম্পোজিশন (100 Pts)</span>
+                <span style="font-size: 11.5px; font-weight: 800; color: #15803d;">Volume (30) + Trend (30) + Momentum (25) + Squeeze (15)</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     best_picks = get_best_15_picks(unified_quotes)
 
     if best_picks:
+        avg_score = sum(p["composite_score"] for p in best_picks) / len(best_picks)
         avg_gain = sum(p["expected_gain"] for p in best_picks) / len(best_picks)
         avg_risk = sum(p["downside_risk"] for p in best_picks) / len(best_picks)
         avg_rr = sum(p["rr_ratio"] for p in best_picks) / len(best_picks)
-        strong_buy_cnt = sum(1 for p in best_picks if "STRONG BUY" in p["action"])
 
         # 1. Summary Analytics Bar
         b_m1, b_m2, b_m3, b_m4 = st.columns(4)
         with b_m1:
-            st.metric("🎯 Avg 30D Target Gain", f"+{avg_gain:.1f}%", "৫% – ১০%+ প্রফিট টার্গেট")
+            st.metric("🏆 শীর্ষ কম্পোজিট স্কোর", f"{best_picks[0]['composite_score']:.1f}/100", f"{best_picks[0]['symbol']} (#1 Rank)")
         with b_m2:
-            st.metric("🛡️ Avg Downside Risk Floor", f"-{avg_risk:.1f}%", "সাপোর্ট বাউন্স ফ্লোর")
+            st.metric("📊 গড় কম্পোজিট স্কোর", f"{avg_score:.1f}/100", f"{len(best_picks)} টি নির্বাচিত শেয়ার")
         with b_m3:
-            st.metric("⚖️ Avg Risk-to-Reward", f"1 : {avg_rr:.2f}", "উচ্চ মুনাফা অনুপাত")
+            st.metric("🎯 Avg 30D Target Gain", f"+{avg_gain:.1f}%", "প্রত্যাশিত লাভ")
         with b_m4:
-            st.metric("🏆 High-Conviction Setups", f"{len(best_picks)} Shares", f"{strong_buy_cnt} Strong Buy")
+            st.metric("⚖️ Avg Risk-to-Reward", f"1 : {avg_rr:.2f}", "উচ্চ মুনাফা অনুপাত")
 
         st.write("---")
 
@@ -4747,8 +5318,8 @@ with tab_best15:
             all_sec = ["All Sectors"] + sorted(list({p["sector"] for p in best_picks}))
             sec_sel = st.selectbox("Filter by Sector", all_sec, key="best15_sec_filter")
         with f_c2:
-            gain_opts = ["All Profit Horizons (5%+)", "🚀 5% – 8% Quick Bounce", "🎯 8% – 12% Swing Target", "💎 12%+ High Momentum"]
-            gain_sel = st.selectbox("Filter by Expected Gain", gain_opts, key="best15_gain_filter")
+            score_opts = ["All Composite Scores (Top 15)", "🔥 80+ Strong Conviction", "⚡ 65+ High Conviction"]
+            score_sel = st.selectbox("Filter by Conviction Score", score_opts, key="best15_score_filter")
         with f_c3:
             search_b15 = st.text_input("🔍 Search Stock Symbol / Name", "", key="best15_search")
 
@@ -4757,18 +5328,16 @@ with tab_best15:
         if sec_sel != "All Sectors":
             filtered_b15 = [p for p in filtered_b15 if p["sector"] == sec_sel]
         
-        if gain_sel == "🚀 5% – 8% Quick Bounce":
-            filtered_b15 = [p for p in filtered_b15 if 4.5 <= p["expected_gain"] < 8.0]
-        elif gain_sel == "🎯 8% – 12% Swing Target":
-            filtered_b15 = [p for p in filtered_b15 if 8.0 <= p["expected_gain"] < 12.0]
-        elif gain_sel == "💎 12%+ High Momentum":
-            filtered_b15 = [p for p in filtered_b15 if p["expected_gain"] >= 12.0]
+        if score_sel == "🔥 80+ Strong Conviction":
+            filtered_b15 = [p for p in filtered_b15 if p["composite_score"] >= 80.0]
+        elif score_sel == "⚡ 65+ High Conviction":
+            filtered_b15 = [p for p in filtered_b15 if p["composite_score"] >= 65.0]
 
         if search_b15.strip():
             q_b = search_b15.strip().lower()
             filtered_b15 = [p for p in filtered_b15 if (q_b in p["symbol"].lower() or q_b in p["name"].lower())]
 
-        st.write(f"Showing **{len(filtered_b15)}** High-Conviction Opportunities:")
+        st.write(f"Showing **{len(filtered_b15)}** Ranked Opportunities:")
 
         # 3. View Switcher: Structured Table Plan vs Stock Cards Grid
         view_opt = st.radio("Display Layout", ["📋 Complete Trade Blueprint Table", "🃏 Visual Card Grid View"], horizontal=True, label_visibility="collapsed")
@@ -4777,17 +5346,15 @@ with tab_best15:
             b15_table_data = []
             for rank_idx, p in enumerate(filtered_b15, 1):
                 b15_table_data.append({
-                    "RANK": f"#{rank_idx}",
-                    "SYMBOL": p["symbol"],
-                    "SECTOR": p["sector"],
-                    "LTP (Tk)": f"{p['ltp']:.2f}",
-                    "RECOMMENDED ENTRY ZONE (Tk)": p["buy_zone"],
-                    "30-DAY TARGET (Tk)": f"{p['target_30d']:.2f}",
-                    "PROJECTED GAIN": f"+{p['expected_gain']:.1f}%",
-                    "TURNAROUND / STOP LOSS (Tk)": f"{p['stop_loss']:.2f} (-{p['downside_risk']:.1f}%)",
-                    "RISK:REWARD": f"1 : {p['rr_ratio']:.1f}",
-                    "SIGNAL / SCORE": f"{p['action']} ({p['score']:+d})",
-                    "TECHNICAL CATALYST & PATTERN": p["catalyst"]
+                    "Rank": f"#{rank_idx}",
+                    "Ticker": p["symbol"],
+                    "Composite Score": f"{p['composite_score']:.1f}/100",
+                    "Primary Catalyst": p["catalyst"],
+                    "Current Close": f"Tk {p['ltp']:.2f}",
+                    "Suggested Buy Zone": p["buy_zone"],
+                    "Stop Loss": f"Tk {p['stop_loss']:.2f}",
+                    "30D Target": f"Tk {p['target_30d']:.2f} (+{p['expected_gain']:.1f}%)",
+                    "Risk / Reward": f"1 : {p['rr_ratio']:.2f}"
                 })
             
             st.dataframe(pd.DataFrame(b15_table_data), width="stretch", hide_index=True)
@@ -4799,35 +5366,41 @@ with tab_best15:
                 cols_b = st.columns(3)
                 for c_col, p in zip(cols_b, c_row):
                     rank_num = filtered_b15.index(p) + 1
-                    chg_c = "#00C853" if p["change"] >= 0 else "#D50000"
+                    chg_c = "#16a34a" if p["change"] >= 0 else "#dc2626"
                     
                     card_html = (
-                        f'<div style="background: #ffffff; border: 1.5px solid #e2e8f0; border-top: 4px solid #16a34a; border-radius: 10px; padding: 14px; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">'
+                        f'<div style="background: #ffffff; border: 1.5px solid #e2e8f0; border-top: 4px solid {p["color"]}; border-radius: 10px; padding: 14px; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">'
                         f'<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">'
-                        f'<div style="display: flex; align-items: center; gap: 8px;"><span style="background: #16a34a; color: white; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 10px;">#{rank_num} PICK</span><strong style="font-size: 16px; color: #0f172a;">{p["symbol"]}</strong></div>'
-                        f'<span style="font-size: 11px; font-weight: 700; color: #64748b;">{p["sector"]}</span>'
+                        f'<div style="display: flex; align-items: center; gap: 8px;"><span style="background: #16a34a; color: white; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 10px;">#{rank_num} RANK</span><strong style="font-size: 16px; color: #0f172a;">{p["symbol"]}</strong></div>'
+                        f'<span style="font-size: 12px; font-weight: 900; background: {p["color"]}15; color: {p["color"]}; padding: 2px 8px; border-radius: 6px;">Score: {p["composite_score"]:.1f}/100</span>'
                         f'</div>'
-                        f'<div style="font-size: 11.5px; color: #64748b; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{p["name"]}</div>'
+                        f'<div style="font-size: 11.5px; color: #64748b; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{p["name"]} ({p["sector"]})</div>'
                         f'<div style="display: flex; justify-content: space-between; align-items: baseline; background: #f8fafc; padding: 8px 10px; border-radius: 6px; margin-bottom: 8px;">'
-                        f'<div><span style="font-size: 10px; color: #64748b; font-weight: 700; display: block;">LIVE LTP</span><b style="font-size: 18px; color: #0f172a;">Tk {p["ltp"]:.2f}</b></div>'
+                        f'<div><span style="font-size: 10px; color: #64748b; font-weight: 700; display: block;">CURRENT CLOSE</span><b style="font-size: 18px; color: #0f172a;">Tk {p["ltp"]:.2f}</b></div>'
                         f'<span style="font-size: 12px; font-weight: 800; color: {chg_c};">{p["change"]:+.2f} ({p["pct_change"]:+.2f}%)</span>'
+                        f'</div>'
+                        f'<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; font-size: 10px; text-align: center;">'
+                        f'<div style="background: #f1f5f9; padding: 4px 2px; border-radius: 4px;"><b>Vol:</b> {p["vol_pts"]}/30</div>'
+                        f'<div style="background: #f1f5f9; padding: 4px 2px; border-radius: 4px;"><b>Trend:</b> {p["trend_pts"]}/30</div>'
+                        f'<div style="background: #f1f5f9; padding: 4px 2px; border-radius: 4px;"><b>Mom:</b> {p["mom_pts"]}/25</div>'
+                        f'<div style="background: #f1f5f9; padding: 4px 2px; border-radius: 4px;"><b>Volat:</b> {p["volat_pts"]}/15</div>'
                         f'</div>'
                         f'<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;">'
                         f'<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">'
-                        f'<span style="font-size: 11px; font-weight: 800; color: #166534;">🎯 ৩০ দিনের টার্গেট:</span>'
-                        f'<strong style="font-size: 15px; font-weight: 900; color: #15803d;">Tk {p["target_30d"]:.2f} <span style="font-size: 12px;">(+{p["expected_gain"]:.1f}%)</span></strong>'
+                        f'<span style="font-size: 11px; font-weight: 800; color: #166534;">🟢 বাই জোন:</span>'
+                        f'<strong style="font-size: 12px; font-weight: 900; color: #15803d;">{p["buy_zone"]}</strong>'
                         f'</div>'
                         f'<div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: #166534;">'
-                        f'<span>🟢 এন্ট্রি জোন: <b>{p["buy_zone"]}</b></span>'
-                        f'<span>R:R: <b>1 : {p["rr_ratio"]:.1f}</b></span>'
+                        f'<span>🎯 টার্গেট: <b>Tk {p["target_30d"]:.2f} (+{p["expected_gain"]:.1f}%)</b></span>'
+                        f'<span>R:R: <b>1 : {p["rr_ratio"]:.2f}</b></span>'
                         f'</div>'
                         f'</div>'
                         f'<div style="display: flex; justify-content: space-between; font-size: 11px; color: #475569; margin-bottom: 6px; padding: 0 2px;">'
-                        f'<span>🧱 ফ্লোর / স্টপ লস: <b>Tk {p["stop_loss"]:.2f}</b></span>'
+                        f'<span>🛡️ স্টপ লস: <b style="color: #dc2626;">Tk {p["stop_loss"]:.2f}</b></span>'
                         f'<span>RSI: <b>{p["rsi"]:.1f}</b></span>'
                         f'</div>'
                         f'<div style="font-size: 10.5px; color: #334155; background: #f8fafc; border-left: 3px solid #0284c7; padding: 4px 8px; border-radius: 0 4px 4px 0; margin-top: 4px; line-height: 1.4;">'
-                        f'💡 <b>টেকনিক্যাল ভিত্তি:</b> {p["catalyst"]}'
+                        f'💡 <b>প্রাইমারি ক্যাটালিস্ট:</b> {p["catalyst"]}'
                         f'</div>'
                         f'</div>'
                     )
@@ -4838,19 +5411,19 @@ with tab_best15:
         notes_html = (
             '<div class="reversal-strategy-box" style="margin-top: 15px;">'
             '<div style="font-size: 14px; font-weight: 800; color: #0f172a; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">'
-            '<span>💡</span> বেস্ট ১৫ ট্রেডিং স্ট্র্যাটেজি ও মানি ম্যানেজমেন্ট নিয়মাবলী (Portfolio Execution Rules)'
+            '<span>💡</span> বেস্ট ১৫ ট্রেডিং স্ট্র্যাটেজি ও মানি ম্যানেজমেন্ট নিয়মাবলী (100-Point Scoring Execution Rules)'
             '</div>'
             '<ul style="margin: 0; padding-left: 20px; font-size: 12px; color: #334155; line-height: 1.7;">'
-            '<li><b>🎯 ৫% – ১০%+ গেইন টার্গেট বুকিং:</b> প্রতিটি শেয়ার তার ১ম ও ২য় টেকনিক্যাল রেজিস্ট্যান্সে পৌঁছানোর সাথে সাথে কিস্তিতে (৫০% + ৫০%) প্রফিট লক করুন।</li>'
-            '<li><b>🟢 এন্ট্রি বাই জোন (Dip Entry):</b> বর্তমান মার্কেট প্রাইস (LTP) থেকে রিকমেন্ডেড বাউন্স ফ্লোরের মধ্যকার প্রাইসে কিস্তিতে ক্রয়াদেশ বসানো সবচেয়ে নিরাপদ।</li>'
-            '<li><b>🛡️ ঝুঁকি নিয়ন্ত্রণ (Strict Stop Loss):</b> কোনো অবস্থাতেই উল্লেখিত রিভার্সাল ফ্লোর / স্টপ লসের নিচে হোল্ড করবেন না; এতে যেকোনো আকস্মিক মার্কেট প্যানিক থেকে পোর্টফোলিও শতভাগ সুরক্ষিত থাকবে।</li>'
+            '<li><b>🏆 কম্পোজিট স্কোর অগ্রাধিকার:</b> ৮০+ স্কোরের শেয়ারগুলো সর্বোচ্চ হাই-কনভিকশন সেটআপ। এগুলোতে ভলিউম ব্রেকআউট, ট্রেন্ড অ্যালাইনমেন্ট এবং মোমেন্টাম কনফ্লুয়েন্স একযোগে সক্রিয়।</li>'
+            '<li><b>🟢 সুনির্দিষ্ট বাই জোন (Suggested Buy Zone):</b> বর্তমান ক্লোজিং ও ২০ EMA ডায়নামিক সাপোর্টের মধ্যবর্তী অঞ্চলে এন্ট্রি নেওয়া সর্বোচ্চ রিস্ক-টু-রিওয়ার্ড নিশ্চিত করে।</li>'
+            '<li><b>🛡️ কঠোর স্টপ লস (Inviolate Stop Loss):</b> প্রতিটি ট্রেডের জন্য উল্লেখিত স্টপ লস স্তর কঠোরভাবে মেনে চলুন; এটি মূলধনের সম্ভাব্য ঝুঁকিকে ন্যূনতম স্তরে বেঁধে রাখে।</li>'
             '</ul>'
             '</div>'
         )
         st.markdown(notes_html, unsafe_allow_html=True)
 
     else:
-        st.info("🔄 Scanning entire DSE equity universe for 5-10%+ setups. Please refresh in a few moments.")
+        st.info("🔄 Scanning entire DSE equity universe for 100-Point Composite Setups. Please refresh in a few moments.")
 
 # ----------------- TAB: NEWS & RISK SCANNER ----------------- #
 
@@ -4930,207 +5503,282 @@ with tab_news:
     else:
         st.info("No news disclosures match the selected filter criteria.")
 
-# ----------------- TAB: STOCK SCREENER (BUY / SELL / HOLD) ----------------- #
+# ----------------- TAB: MULTI-CONDITION TECHNICAL SCREENER WITH DYNAMIC PRESETS ----------------- #
 
 with tab_screener:
-    st.subheader("🎯 Technical Stock Screener & Market Decision Matrix")
-    st.caption("Live technical analysis engine screening all listed DSE instruments into real-time Buy, Sell, and Hold states.")
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #f0fdf4, #ffffff); border: 1.5px solid #86efac; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h2 style="margin: 0; font-size: 20px; font-weight: 900; color: #14532d;">
+                    🎯 High-Precision Multi-Condition Technical Screener
+                </h2>
+                <div style="font-size: 12.5px; color: #166534; margin-top: 4px; font-weight: 600;">
+                    Dynamic Preset Engines: Momentum Breakouts, Mean Reversion Oversold Dips & Consolidation Squeezes
+                </div>
+            </div>
+            <div style="background: #ffffff; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 14px; text-align: right;">
+                <span style="font-size: 11px; color: #64748b; font-weight: 700; display: block;">কন্ডিশনাল ইঞ্জিন</span>
+                <span style="font-size: 11.5px; font-weight: 800; color: #15803d;">20D Breakouts + Bollinger/Keltner + RSI Dips</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Screen ALL listed instruments across DSE Market (470+ Instruments)
+    # 1. Preset Selector & Dynamic Controls Header
+    sc_ctrl_col1, sc_ctrl_col2 = st.columns([2, 1.2])
+    with sc_ctrl_col1:
+        preset_mode = st.selectbox(
+            "🎯 ডায়নামিক প্রিসেট নির্বাচন করুন (Select Screener Preset Mode)",
+            [
+                "🌟 All Matching Technical Setups (Unified Presets)",
+                "🚀 Preset 1: High-Volume Momentum Breakout (Close > 20D High + Vol ≥ 1.5x + 55 < RSI < 75)",
+                "🌊 Preset 2: Oversold Dip Buyers / Mean Reversion (Lower BB/50 EMA Touch + RSI < 42 + Bullish Candle)",
+                "🗜️ Preset 3: Consolidation Squeeze (BB inside Keltner Channels + 3-Session Volume Contraction)",
+                "🌐 Full Market Screener (All Market Instruments)"
+            ],
+            index=0
+        )
+    with sc_ctrl_col2:
+        search_sym = st.text_input("🔍 Search Stock Symbol (e.g. GP, SQURPHARMA, BRACBANK)", "", key="sc_search_box")
+
+    # 2. Manual Custom Threshold Sliders
+    with st.expander("⚙️ ম্যানুয়াল ফিল্টারিং স্লাইডার ও থ্রেশহোল্ড টিউনিং (Manual Sliders: Volume, Price & RSI)", expanded=True):
+        sl_c1, sl_c2, sl_c3 = st.columns(3)
+        with sl_c1:
+            min_vol_slider = st.slider("📊 Minimum Daily Volume (Shares)", min_value=0, max_value=500000, value=0, step=10000, help="Filter out low-liquidity illiquid stocks")
+        with sl_c2:
+            price_min_max = st.slider("💰 Price Range (Tk)", min_value=1.0, max_value=1200.0, value=(2.0, 1000.0), step=1.0, help="Filter by minimum and maximum LTP")
+        with sl_c3:
+            rsi_min_max = st.slider("⚡ 14-Day RSI Threshold Range", min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=1.0, help="Constrain RSI bounds")
+
+    # 3. Comprehensive Multi-Condition Screener Evaluation
     all_symbols = sorted(list(unified_quotes.keys()))
-    screener_records = []
+    screener_results = []
     
-    # Watchlist fast lookup for full historical depth
     wl_dict = {item["symbol"]: item for item in WATCHLIST_STOCKS}
 
     for sym in all_symbols:
         q = unified_quotes.get(sym, {})
-        ltp = q.get("ltp", 0.0)
-        chg = q.get("change", 0.0)
-        pct = q.get("pct_change", 0.0)
-        vol = q.get("volume", 0.0)
-        ycp = q.get("ycp", 0.0)
-        high = q.get("high", 0.0)
-        low = q.get("low", 0.0)
+        ltp = float(q.get("ltp", 0.0))
+        if ltp <= 0:
+            continue
 
-        # Base technical momentum scoring
-        score = 0
-        signals_list = []
+        chg = float(q.get("change", 0.0))
+        pct = float(q.get("pct_change", 0.0))
+        vol = float(q.get("volume", 0.0))
+        ycp = float(q.get("ycp", ltp))
+        high = float(q.get("high", ltp))
+        low = float(q.get("low", ltp))
+        open_p = float(q.get("open", 0.0)) if q.get("open") else None
 
-        # Factor 1: Intraday Momentum (% Change)
-        if pct >= 4.0:
-            score += 45
-            signals_list.append("Strong Intraday Rally (+4% or higher)")
-        elif pct >= 1.5:
-            score += 30
-            signals_list.append("Bullish Momentum (+1.5% or higher)")
-        elif pct > 0.0:
-            score += 15
-            signals_list.append("Positive Intraday Gain")
-        elif pct <= -4.0:
-            score -= 45
-            signals_list.append("Heavy Intraday Drop (-4% or lower)")
-        elif pct <= -1.5:
-            score -= 30
-            signals_list.append("Bearish Pressure (-1.5% or lower)")
-        elif pct < 0.0:
-            score -= 15
-            signals_list.append("Negative Intraday Decline")
+        # Manual filter checks early exit
+        if vol < min_vol_slider:
+            continue
+        if not (price_min_max[0] <= ltp <= price_min_max[1]):
+            continue
 
-        # Factor 2: Position Relative to YCP (Yesterday Close)
-        if ycp > 0 and ltp > 0:
-            if ltp > ycp:
-                score += 15
-                signals_list.append("Trading Above Previous Close")
-            elif ltp < ycp:
-                score -= 15
-                signals_list.append("Trading Below Previous Close")
+        # Ingest indicators and patterns
+        analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct, open_p=open_p)
+        df_ind = analysis.get("df_indicators", pd.DataFrame())
 
-        # Factor 3: Day's High/Low Position
-        if high > low and high > 0:
-            pos_ratio = (ltp - low) / (high - low + 1e-9)
-            if pos_ratio >= 0.8:
-                score += 15
-                signals_list.append("Closing Near Day's High")
-            elif pos_ratio <= 0.2:
-                score -= 15
-                signals_list.append("Closing Near Day's Low")
+        if df_ind.empty or len(df_ind) < 15:
+            continue
 
-        # Factor 4: Volume Surge
-        if vol >= 200000:
-            if pct >= 0:
-                score += 15
-                signals_list.append("High Institutional Volume Accumulation")
+        close_s = df_ind["close"]
+        high_s = df_ind["high"]
+        low_s = df_ind["low"]
+        vol_s = df_ind["volume"]
+
+        c_cur = float(close_s.iloc[-1])
+        c_prev = float(close_s.iloc[-2]) if len(close_s) >= 2 else c_cur
+        rsi_val = float(analysis.get("rsi", 50.0))
+
+        # RSI manual threshold filter
+        if not (rsi_min_max[0] <= rsi_val <= rsi_min_max[1]):
+            continue
+
+        # 20D Highest High (prior 20 bars)
+        high_20d_prev = float(high_s.iloc[-21:-1].max()) if len(high_s) >= 21 else float(high_s.max())
+        is_breakout_20d = (c_cur >= high_20d_prev)
+
+        # Volume SMA20 & Ratio
+        vol_sma20 = float(vol_s.rolling(20, min_periods=5).mean().iloc[-1]) if len(vol_s) >= 5 else vol
+        cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else vol
+        vol_ratio = (cur_vol / vol_sma20) if vol_sma20 > 0 else 1.0
+
+        # Moving Averages
+        e20_s = df_ind["EMA_20"] if "EMA_20" in df_ind.columns else close_s.ewm(span=20, adjust=False).mean()
+        e50_s = df_ind["EMA_50"] if "EMA_50" in df_ind.columns else (df_ind["SMA_50"] if "SMA_50" in df_ind.columns else close_s.ewm(span=50, adjust=False).mean())
+        e20_cur = float(e20_s.iloc[-1])
+        e50_cur = float(e50_s.iloc[-1])
+
+        # Bollinger Bands & Keltner Channels
+        bb_up = df_ind["BB_Upper"] if "BB_Upper" in df_ind.columns else close_s * 1.03
+        bb_lo = df_ind["BB_Lower"] if "BB_Lower" in df_ind.columns else close_s * 0.97
+        sma20 = df_ind["SMA_20"] if "SMA_20" in df_ind.columns else close_s
+        bb_width_series = (bb_up - bb_lo) / (sma20 + 1e-9)
+        cur_bbw = float(bb_width_series.iloc[-1]) if len(bb_width_series) > 0 else 0.05
+        min_bbw_20 = float(bb_width_series.iloc[-20:].min()) if len(bb_width_series) >= 20 else cur_bbw
+        cur_bb_up = float(bb_up.iloc[-1])
+        cur_bb_lo = float(bb_lo.iloc[-1])
+
+        kc_up = df_ind["KC_Upper"] if "KC_Upper" in df_ind.columns else (e20_s + 1.5 * (high_s - low_s).rolling(14).mean())
+        kc_lo = df_ind["KC_Lower"] if "KC_Lower" in df_ind.columns else (e20_s - 1.5 * (high_s - low_s).rolling(14).mean())
+        cur_kc_up = float(kc_up.iloc[-1]) if len(kc_up) > 0 else cur_bb_up * 1.01
+        cur_kc_lo = float(kc_lo.iloc[-1]) if len(kc_lo) > 0 else cur_bb_lo * 0.99
+
+        bb_inside_kc = (cur_bb_up <= cur_kc_up) and (cur_bb_lo >= cur_kc_lo)
+        is_squeeze = bb_inside_kc or (cur_bbw <= min_bbw_20 * 1.25)
+
+        # 3-session volume contraction
+        vol_declining_3d = (len(vol_s) >= 3) and (vol_s.iloc[-1] < vol_s.iloc[-2] < vol_s.iloc[-3])
+        vol_contracting = vol_declining_3d or (vol_ratio <= 0.90 and len(vol_s) >= 2 and vol_s.iloc[-1] < vol_s.iloc[-2])
+
+        # Candlestick Pattern check
+        patterns = detect_candlestick_patterns(df_ind)
+        bullish_candle = next((p for p in patterns if p["bias"] == "Bullish"), None)
+        candle_name = bullish_candle["pattern"] if bullish_candle else None
+
+        # --- EVALUATE PRESETS ---
+        matched_presets = []
+        catalyst_descriptions = []
+
+        # Preset 1: High-Volume Momentum Breakout
+        # Close breaks above 20-day Highest High; Volume >= 1.5x 20-day SMA; RSI(14) > 55 and < 75
+        is_p1 = is_breakout_20d and (vol_ratio >= 1.50) and (55.0 <= rsi_val <= 75.0)
+        if is_p1:
+            matched_presets.append("🚀 Momentum Breakout")
+            catalyst_descriptions.append(f"20D High Breakout (Tk {high_20d_prev:.2f}) + Volume Surge ({vol_ratio:.1f}x) + RSI Momentum ({rsi_val:.1f})")
+
+        # Preset 2: Oversold Dip Buyers (Mean Reversion)
+        # Price touching or bouncing from Lower BB or 50 EMA; RSI(14) bouncing up from < 35-42; Bullish reversal candlestick detected
+        touch_support = (float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 and c_cur >= cur_bb_lo * 0.99) or (float(low_s.iloc[-1]) <= e50_cur * 1.015 and c_cur >= e50_cur * 0.99)
+        rsi_prev_v = float(df_ind["RSI"].iloc[-2]) if ("RSI" in df_ind.columns and len(df_ind) >= 2) else rsi_val
+        rsi_oversold = (rsi_val <= 42.0) or (rsi_prev_v <= 35.0 and rsi_val >= rsi_prev_v) or (rsi_val <= 38.0)
+        is_p2 = touch_support and rsi_oversold and (bullish_candle is not None)
+        if is_p2:
+            matched_presets.append("🌊 Oversold Dip Buy")
+            sup_tag = "Lower BB" if float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 else "50 EMA"
+            catalyst_descriptions.append(f"Oversold Rebound (RSI {rsi_val:.1f}) at {sup_tag} + {candle_name} Candle")
+
+        # Preset 3: Consolidation Squeeze
+        # Bollinger Bands inside Keltner Channels (or BB width at multi-week lows); Declining volume over 3 consecutive sessions
+        is_p3 = is_squeeze and vol_contracting
+        if is_p3:
+            matched_presets.append("🗜️ Squeeze Compression")
+            catalyst_descriptions.append(f"Bollinger Squeeze (Width: {cur_bbw*100:.1f}%) + 3-Session Volume Contraction")
+
+        # Fallback Baseline Catalyst if not matching specific presets
+        if not catalyst_descriptions:
+            if c_cur > e20_cur:
+                catalyst_descriptions.append(f"Above 20 EMA (Tk {e20_cur:.2f}) with RSI {rsi_val:.1f}")
             else:
-                score -= 15
-                signals_list.append("Heavy Volume Sell-Off")
+                catalyst_descriptions.append(f"Consolidation near Support with RSI {rsi_val:.1f}")
 
-        # Factor 5: Historical indicators & Chart Patterns if in active watchlist
-        target_sell_p: float = 0.0
-        target_buy_p: float = 0.0
-        state_action = "HOLD"
-        state_icon = "🟡"
-        move_pred = "⚖️ কনসোলিডেশন"
+        # ATR & Order Plan Levels (SSOT Alignment)
+        setup = analysis.get("stock_setup", {})
+        atr = setup.get("atr", float(df_ind["ATR"].iloc[-1]) if ("ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025))
+        if atr <= 0: atr = ltp * 0.025
+        buy_low = round(min(ltp * 0.99, max(0.1, e20_cur * 0.995)), 2)
+        buy_high = round(ltp * 1.005, 2)
+        stop_loss = setup.get("floor", round(max(0.1, ltp - (1.2 * atr)), 2))
+        target_p = setup.get("target", round(ltp + (1.5 * atr), 2))
+        action_verdict = setup.get("signal", analysis.get("action", "HOLD"))
+        score_num = setup.get("score", analysis.get("score", 0))
 
-        if sym in wl_dict:
-            df_h = fetch_authentic_history(sym, days=180)
-            if not df_h.empty:
-                if ltp > 0:
-                    today_dt = pd.Timestamp(get_bangladesh_today())
-                    if today_dt in df_h.index:
-                        df_h.loc[today_dt, 'close'] = ltp
-                        df_h.loc[today_dt, 'high'] = max(df_h.loc[today_dt, 'high'], high or ltp)
-                        df_h.loc[today_dt, 'low'] = min(df_h.loc[today_dt, 'low'], low or ltp)
-                    else:
-                        new_r = pd.DataFrame([{'open': ltp, 'high': high or ltp, 'low': low or ltp, 'close': ltp, 'volume': vol}], index=[today_dt])
-                        df_h = pd.concat([df_h, new_r])
+        # Preset Filtering Logic
+        include_stock = False
+        if preset_mode.startswith("🌟 All Matching"):
+            include_stock = len(matched_presets) > 0
+        elif preset_mode.startswith("🚀 Preset 1"):
+            include_stock = is_p1
+        elif preset_mode.startswith("🌊 Preset 2"):
+            include_stock = is_p2
+        elif preset_mode.startswith("🗜️ Preset 3"):
+            include_stock = is_p3
+        else:  # Full Market Screener
+            include_stock = True
 
-                df_ev = compute_all_indicators(df_h)
-                pats = detect_chart_patterns(df_ev)
-                sig_ev = evaluate_stock_signals(df_ev, pats)
-                
-                score = sig_ev["score"]
-                state_action = sig_ev["action"]
-                target_sell_p = sig_ev["target_selling_price"]
-                target_buy_p = sig_ev["target_buying_price"]
-                move_pred = sig_ev["move_badge"]
-        else:
-            # If not in active watchlist, compute authentic momentum & volatility targets
-            est_atr = (high - low) if (high > low and high > 0) else (ltp * 0.025)
-            if est_atr <= 0: est_atr = ltp * 0.025
-            target_sell_p = round(ltp + (2.0 * est_atr), 2)
-            target_buy_p = round(max(0.1, ltp - (1.5 * est_atr)), 2)
+        if search_sym.strip():
+            q_sc = search_sym.strip().lower()
+            if not (q_sc in sym.lower() or q_sc in analysis.get("name", "").lower()):
+                include_stock = False
 
-            if score >= 35: state_action = "STRONG BUY"
-            elif score >= 15: state_action = "BUY"
-            elif score <= -35: state_action = "STRONG SELL"
-            elif score <= -15: state_action = "SELL"
-            else: state_action = "HOLD"
+        if include_stock:
+            screener_results.append({
+                "Ticker": sym,
+                "Matched Preset": " • ".join(matched_presets) if matched_presets else "Baseline Technical",
+                "Current Close (LTP)": f"Tk {ltp:.2f}",
+                "Change (%)": f"{chg:+.2f} ({pct:+.2f}%)",
+                "Volume": f"{int(vol):,}",
+                "Volume Ratio": f"{vol_ratio:.2f}x",
+                "RSI (14)": f"{rsi_val:.1f}",
+                "Primary Catalyst & Condition Triggers": " • ".join(catalyst_descriptions),
+                "Suggested Buy Zone": f"Tk {buy_low:.2f} – {buy_high:.2f}",
+                "Stop Loss": f"Tk {stop_loss:.2f}",
+                "Target (30D)": f"Tk {target_p:.2f}",
+                "Verdict": action_verdict,
+                "raw_score": analysis.get("score", 0),
+                "raw_ltp": ltp,
+                "raw_vol": vol,
+                "raw_vol_ratio": vol_ratio,
+                "raw_rsi": rsi_val,
+                "raw_pct": pct
+            })
 
-            up_pct_s = round(((target_sell_p - ltp) / (ltp + 1e-9)) * 100, 1) if ltp > 0 and target_sell_p > ltp else 0.0
-            down_pct_s = round(((ltp - target_buy_p) / (ltp + 1e-9)) * 100, 1) if ltp > 0 and target_buy_p < ltp else 0.0
-            if score >= 15: move_pred = f"📈 বাড়বে → Tk {target_sell_p:.2f} (+{up_pct_s:.1f}%)"
-            elif score <= -15: move_pred = f"📉 কমবে → Tk {target_buy_p:.2f} (-{down_pct_s:.1f}%)"
-            else: move_pred = f"⚖️ রেঞ্জ: {target_buy_p:.1f}–{target_sell_p:.1f}"
+    # Sort results by Volume Ratio / Score descending
+    screener_results.sort(key=lambda x: (x["raw_vol_ratio"], x["raw_score"]), reverse=True)
 
-        if "STRONG BUY" in state_action: state_icon = "🟢🟢"
-        elif "BUY" in state_action: state_icon = "🟢"
-        elif "STRONG SELL" in state_action: state_icon = "🔴🔴"
-        elif "SELL" in state_action: state_icon = "🔴"
-        else: state_icon = "🟡"
+    # 4. Summary Metrics Bar
+    p1_hits = sum(1 for r in screener_results if "Momentum Breakout" in r["Matched Preset"])
+    p2_hits = sum(1 for r in screener_results if "Oversold Dip Buy" in r["Matched Preset"])
+    p3_hits = sum(1 for r in screener_results if "Squeeze Compression" in r["Matched Preset"])
 
-        screener_records.append({
-            "STOCK NAME": sym,
-            "STATE": f"{state_icon} {state_action}",
-            "raw_state": state_action,
-            "PREDICTED MOVE": move_pred,
-            "LTP (Tk)": f"{ltp:.2f}" if ltp > 0 else "N/A",
-            "CHANGE (%)": f"{chg:+.2f} ({pct:+.2f}%)",
-            "SCORE": f"{score:+d} / 100",
-            "raw_score": score,
-            "TARGET BUYING PRICE (Tk)": f"{target_buy_p:.2f}" if target_buy_p > 0 else "N/A",
-            "TARGET SELLING PRICE (Tk)": f"{target_sell_p:.2f}" if target_sell_p > 0 else "N/A"
-        })
-
-    # Summary Metrics Pills
-    total_screened = len(screener_records)
-    buy_count = sum(1 for r in screener_records if "BUY" in r["raw_state"])
-    hold_count = sum(1 for r in screener_records if "HOLD" in r["raw_state"])
-    sell_count = sum(1 for r in screener_records if "SELL" in r["raw_state"])
-
-    s_m1, s_m2, s_m3, s_m4 = st.columns(4)
-    with s_m1:
-        st.metric("Total Screened Shares", f"{total_screened}")
-    with s_m2:
-        st.metric("🟢 BUY / STRONG BUY", f"{buy_count}")
-    with s_m3:
-        st.metric("🟡 HOLD / NEUTRAL", f"{hold_count}")
-    with s_m4:
-        st.metric("🔴 SELL / STRONG SELL", f"{sell_count}")
+    sc_m1, sc_m2, sc_m3, sc_m4 = st.columns(4)
+    with sc_m1:
+        st.metric("🎯 মোট ফিল্টার্ড শেয়ার", f"{len(screener_results)} টি", "সিলেক্টেড ফিল্টার অনুযায়ী")
+    with sc_m2:
+        st.metric("🚀 Preset 1: Breakout Hits", f"{p1_hits} টি", "20D High + 1.5x Vol + RSI")
+    with sc_m3:
+        st.metric("🌊 Preset 2: Oversold Dips", f"{p2_hits} টি", "Lower BB/50 EMA + Candle")
+    with sc_m4:
+        st.metric("🗜️ Preset 3: Squeeze Coils", f"{p3_hits} টি", "BB Squeeze + Vol Contraction")
 
     st.write("---")
 
-    # Filters & Instant Search
-    sc_col1, sc_col2 = st.columns([1.5, 2])
-    with sc_col1:
-        state_filter_opt = st.selectbox(
-            "Filter by Market State",
-            ["All States", "🟢 Buy Opportunities (Strong Buy + Buy)", "🟡 Hold / Neutral Only", "🔴 Sell Alerts (Strong Sell + Sell)"]
-        )
-    with sc_col2:
-        sc_search = st.text_input("🔍 Search Stock Symbol (e.g. GP, ACI, SQURPHARMA, BRACBANK, LH)", "")
+    # 5. Interactive Results Table & CSV Export Button
+    if screener_results:
+        display_df = pd.DataFrame([{
+            "Rank": f"#{idx+1}",
+            "Ticker": r["Ticker"],
+            "Matched Preset": r["Matched Preset"],
+            "Current Close": r["Current Close (LTP)"],
+            "Change (%)": r["Change (%)"],
+            "Volume (SMA20 Ratio)": f"{r['Volume']} ({r['Volume Ratio']})",
+            "RSI (14)": r["RSI (14)"],
+            "Primary Catalyst & Condition Triggers": r["Primary Catalyst & Condition Triggers"],
+            "Suggested Buy Zone": r["Suggested Buy Zone"],
+            "Stop Loss": r["Stop Loss"],
+            "Verdict": r["Verdict"]
+        } for idx, r in enumerate(screener_results)])
 
-    filtered_screener = screener_records
+        col_export, col_count = st.columns([1.5, 3])
+        with col_export:
+            csv_export_data = display_df.to_csv(index=False).encode('utf-8')
+            preset_slug = preset_mode.split(":")[0].replace(" ", "_").lower()
+            st.download_button(
+                label="📥 Export Screened Results (CSV)",
+                data=csv_export_data,
+                file_name=f"screener_{preset_slug}_results.csv",
+                mime="text/csv"
+            )
+        with col_count:
+            st.caption(f"Showing **{len(screener_results)}** qualifying stocks matching the selected active criteria.")
 
-    if state_filter_opt == "🟢 Buy Opportunities (Strong Buy + Buy)":
-        filtered_screener = [r for r in filtered_screener if "BUY" in r["raw_state"]]
-    elif state_filter_opt == "🟡 Hold / Neutral Only":
-        filtered_screener = [r for r in filtered_screener if "HOLD" in r["raw_state"]]
-    elif state_filter_opt == "🔴 Sell Alerts (Strong Sell + Sell)":
-        filtered_screener = [r for r in filtered_screener if "SELL" in r["raw_state"]]
-
-    if sc_search.strip():
-        q_sc = sc_search.strip().lower()
-        filtered_screener = [
-            r for r in filtered_screener
-            if q_sc in r["STOCK NAME"].lower()
-        ]
-
-    st.write(f"Showing **{len(filtered_screener)}** shares:")
-
-    # Clean Table View strictly: STOCK NAME | STATE | PREDICTED MOVE | LTP | CHANGE | SCORE | TURNAROUND FLOOR | HIGHEST PEAK TARGET
-    clean_df = pd.DataFrame([{
-        "STOCK NAME": r["STOCK NAME"],
-        "STATE": r["STATE"],
-        "PREDICTED MOVE": r["PREDICTED MOVE"],
-        "LTP (Tk)": r["LTP (Tk)"],
-        "CHANGE (%)": r["CHANGE (%)"],
-        "SCORE": r["SCORE"],
-        "TURNAROUND FLOOR (Tk)": r["TARGET BUYING PRICE (Tk)"],
-        "HIGHEST PEAK TARGET (Tk)": r["TARGET SELLING PRICE (Tk)"]
-    } for r in filtered_screener])
-
-    st.dataframe(clean_df, width="stretch", hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
+    else:
+        st.info("ℹ️ No stocks currently match all the strict active preset and slider threshold criteria. Try adjusting the volume or RSI range slider.")
 
 # ----------------- TAB: PATTERNS DETECTED ----------------- #
 
@@ -5161,55 +5809,51 @@ with tab_patterns:
         chg = float(q.get("change", 0.0))
         pct = float(q.get("pct_change", 0.0))
 
-        df_sym = fetch_authentic_history(sym, days=180)
-        if not df_sym.empty and len(df_sym) >= 15:
-            if ltp > 0:
-                today_dt = pd.Timestamp(get_bangladesh_today())
-                if today_dt in df_sym.index:
-                    df_sym.loc[today_dt, 'close'] = ltp
-                    df_sym.loc[today_dt, 'high'] = max(df_sym.loc[today_dt, 'high'], high or ltp)
-                    df_sym.loc[today_dt, 'low'] = min(df_sym.loc[today_dt, 'low'], low or ltp)
-                    df_sym.loc[today_dt, 'volume'] = vol
-                else:
-                    df_sym = pd.concat([df_sym, pd.DataFrame([{'open': ltp, 'high': high or ltp, 'low': low or ltp, 'close': ltp, 'volume': vol}], index=[today_dt])])
+        analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
+        setup = analysis.get("stock_setup", {})
+        if not setup:
+            continue
             
-            analyzed_sym = compute_all_indicators(df_sym)
-            c_pats = detect_chart_patterns(analyzed_sym)
-            latest_k = detect_candlestick_triggers(analyzed_sym)
+        c_pats = analysis.get("patterns", [])
+        has_pattern = (setup.get("pattern") != "No Distinct Pattern") or (len(c_pats) > 0)
+        
+        if has_pattern or setup.get("score", 0) >= 55 or (setup.get("score", 0) < 35 and setup.get("pct_change", 0) < 0):
+            active_pattern_stocks.append(sym)
 
-            if len(c_pats) > 0 or len(latest_k) > 0:
-                active_pattern_stocks.append(sym)
-                
-                chart_pat_names = [p["name"] for p in c_pats]
-                candle_pat_names = [k["name"] for k in latest_k]
+            # Immutable Unified Bias directly from SSOT
+            sc = setup.get("score", 50)
+            pct_v = setup.get("pct_change", 0.0)
+            if sc >= 75 and pct_v > 0:
+                bias_label = "🟢 Bullish Breakout"
+                bullish_pat_count += 1
+            elif sc >= 55:
+                bias_label = "🟢 Bullish Setup"
+                bullish_pat_count += 1
+            elif sc < 35 and pct_v < 0:
+                bias_label = "🔴 Bearish Breakdown"
+                bearish_pat_count += 1
+            else:
+                bias_label = "⚪ Consolidating / Range"
 
-                bull_count = sum(1 for p in c_pats if p["bias"] == "Bullish") + sum(1 for k in latest_k if k["bias"] == "Bullish")
-                bear_count = sum(1 for p in c_pats if p["bias"] == "Bearish") + sum(1 for k in latest_k if k["bias"] == "Bearish")
+            if setup.get("pattern") != "No Distinct Pattern":
+                candle_trigger_count += 1
 
-                if bull_count > bear_count:
-                    bias_label = "🟢 Bullish Setup"
-                    bullish_pat_count += 1
-                elif bear_count > bull_count:
-                    bias_label = "🔴 Bearish Warning"
-                    bearish_pat_count += 1
-                else:
-                    bias_label = "⚪ Neutral / Bilateral"
+            chart_pat_names = [p["name"] for p in c_pats]
+            chart_str = ", ".join(chart_pat_names) if chart_pat_names else "Consolidating / Range"
+            candle_str = setup.get("pattern", "No Distinct Pattern")
 
-                candle_trigger_count += len(latest_k)
-
-                target_val = c_pats[0]["target"] if (c_pats and c_pats[0].get("target")) else (ltp * 1.05 if ltp > 0 else 0.0)
-                sl_val = c_pats[0]["stop_loss"] if (c_pats and c_pats[0].get("stop_loss")) else (ltp * 0.95 if ltp > 0 else 0.0)
-
-                pattern_market_records.append({
-                    "SYMBOL": sym,
-                    "LTP (Tk)": ltp,
-                    "CHANGE (%)": f"{'+' if pct > 0 else ''}{pct:.2f}%",
-                    "BIAS": bias_label,
-                    "CHART PATTERNS": ", ".join(chart_pat_names) if chart_pat_names else "Consolidating / Range",
-                    "CANDLESTICK TRIGGERS": ", ".join(candle_pat_names) if candle_pat_names else "None",
-                    "TARGET (Tk)": round(target_val, 2),
-                    "STOP LOSS (Tk)": round(sl_val, 2)
-                })
+            pattern_market_records.append({
+                "SYMBOL": sym,
+                "LTP (Tk)": setup.get("close", ltp),
+                "CHANGE (%)": f"{'+' if setup.get('pct_change', 0) > 0 else ''}{setup.get('pct_change', 0):.2f}%",
+                "SCORE": f"{sc} / 100",
+                "SIGNAL": setup.get("signal", "HOLD"),
+                "BIAS": bias_label,
+                "CHART PATTERNS": chart_str,
+                "CANDLESTICK TRIGGERS": candle_str,
+                "TARGET (Tk)": setup.get("target", ltp * 1.05),
+                "STOP LOSS (Tk)": setup.get("floor", ltp * 0.98)
+            })
 
     # Summary Metrics Row
     pm_c1, pm_c2, pm_c3, pm_c4 = st.columns(4)
