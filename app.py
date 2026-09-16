@@ -73,9 +73,9 @@ h1, .stHeadingContainer {
     100% { box-shadow: 0 0 0 0 rgba(213, 0, 0, 0); }
 }
 @keyframes pulse-yellow {
-    0% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.7); }
-    70% { box-shadow: 0 0 0 10px rgba(234, 179, 8, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+    0% { box-shadow: 0 0 0 0 rgba(255, 214, 0, 0.8); }
+    70% { box-shadow: 0 0 0 10px rgba(255, 214, 0, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 214, 0, 0); }
 }
 
 .blink-dot-green {
@@ -92,7 +92,7 @@ h1, .stHeadingContainer {
 }
 .blink-dot-yellow {
     display: inline-block; width: 11px; height: 11px;
-    background-color: #eab308; border-radius: 50%;
+    background-color: #FFD600; border-radius: 50%;
     animation: pulse-yellow 1.5s infinite;
     margin-right: 6px; vertical-align: middle;
 }
@@ -729,11 +729,11 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
     entry_zone_str = str(c.get("entry_zone", f"{ltp*0.99:.2f}–{ltp*1.01:.2f}"))
     
     if signal_val in ["STRONG BUY", "BUY", "BUY — BREAKOUT", "BUY — PULLBACK", "BUY — REVERSAL"]:
-        sig_color = "#16a34a" if "BUY" in signal_val else "#00C853"
+        sig_color = "#00C853"
         sig_blinker = "blink-dot-green"
         signal_badge = signal_val
     elif signal_val in ["SELL", "STRONG SELL", "SELL / EXIT", "BEARISH BREAKDOWN"]:
-        sig_color = "#dc2626"
+        sig_color = "#D50000"
         sig_blinker = "blink-dot-red"
         signal_badge = signal_val
     elif "HIGH RISK" in signal_val:
@@ -741,7 +741,7 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
         sig_blinker = "blink-dot-red"
         signal_badge = signal_val
     else:
-        sig_color = "#eab308"
+        sig_color = "#FFD600"
         sig_blinker = "blink-dot-yellow"
         signal_badge = signal_val
 
