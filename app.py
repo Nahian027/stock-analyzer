@@ -271,7 +271,7 @@ h1, .stHeadingContainer {
     flex-direction: column;
     justify-content: space-between;
     height: 100%;
-    min-height: 410px;
+    min-height: 426px;
     box-sizing: border-box;
 }
 .stock-card-container:hover {
@@ -387,6 +387,18 @@ h1, .stHeadingContainer {
     display: flex;
     flex-direction: column;
     justify-content: center;
+    box-sizing: border-box;
+}
+.card-verdict-box {
+    border-radius: 8px;
+    padding: 4px 8px;
+    text-align: center;
+    margin-top: 4px;
+    height: 44px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
     box-sizing: border-box;
 }
 .card-footer-row {
@@ -846,7 +858,12 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
         f'<div style="display: flex; justify-content: space-between; align-items: center;"><span style="color: #475569; font-weight: 700; font-size: 10px;" title="পতন হলে সর্বনিম্ন যেখান থেকে ঘুরে দাঁড়াবে">🟢 <b>Turnaround Floor:</b></span><strong style="color: #00875A; font-size: 11px; font-weight: 800;">Tk {floor_val:.2f} <span style="font-size: 9.5px; font-weight: 700; color: #00875A;">({floor_pct:+.1f}%)</span></strong></div>'
         f'</div>'
         f'{action_matrix_html}'
-        f'<div class="card-footer-row"><span style="color: #334155; font-weight: 700;">Score: <b>{score_val} / 100</b></span><div style="display: flex; align-items: center;"><span class="{sig_blinker}"></span><span style="color: {sig_color}; font-size: 12.5px; font-weight: 500;">{signal_badge}</span></div></div>'
+        f'<div class="card-verdict-box" style="background-color: {sig_color}10; border: 1.5px solid {sig_color};">'
+        f'<div style="font-size: 9.5px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.6px; line-height: 1;">ACTION VERDICT</div>'
+        f'<div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 2px;">'
+        f'<span class="{sig_blinker}"></span><span style="color: {sig_color}; font-size: 14px; font-weight: 500;">{signal_badge} ({score_val})</span>'
+        f'</div>'
+        f'</div>'
         f'</div>'
     )
 
@@ -3361,174 +3378,65 @@ def analyze_stock_setup(df: pd.DataFrame, ticker: str = "STOCK", rsi_5m_val: flo
 
 # ----------------- COMPOSITE DECISION & SCORING ENGINE ----------------- #
 
-def evaluate_stock_signals(df: pd.DataFrame, patterns: list, rsi_5m_data: dict = None) -> dict:
+def evaluate_stock_signals(df: pd.DataFrame, patterns: list = None, rsi_5m_data: dict = None, symbol: str = "STOCK") -> dict:
     """
-    Zero-Dummy 0-100 Multi-Factor Scoring & Mathematical Decision Engine.
-    Scoring Breakdown (Total: 100 Points):
-    - Trend Baseline (30 pts): Price >= 20 EMA (15 pts), 20 EMA >= 50 SMA (15 pts).
-    - Volume & Liquidity (25 pts): Vol Ratio >= 1.5 (25 pts), 1.0 <= Vol Ratio < 1.5 (15 pts), < 1.0 (0 pts).
-    - Momentum & RSI (25 pts): RSI 45-65 with positive MACD slope (25 pts). Overbought (>70) or oversold freefall (<35 without reversal candle) = 0 pts.
-    - Pattern Quality (20 pts): Validated bullish chart/candlestick pattern = 20 pts (Bearish pattern = -15 pts).
-
-    Strict Signal Mapping:
-    - STRONG BUY: Score >= 80 AND Price > 20 EMA AND Vol Ratio >= 1.3.
-    - BUY: Score between 65 and 79.
-    - HOLD / NEUTRAL: Score between 45 and 64 (Strict rule: Score < 65 NEVER triggers BUY).
-    - SELL / EXIT: Score < 45 OR Price < 20 EMA with expanding red volume (Score <= 25 -> STRONG SELL).
+    Single Source of Truth (SSOT) Multi-Factor Scoring & Decision Engine.
+    Guarantees 100% mathematical consistency with core_engine.evaluate_ticker across all tabs.
     """
-    latest = df.iloc[-1]
-    latest_price = float(latest["close"])
-    atr = float(latest.get("ATR", 2.0)) if pd.notnull(latest.get("ATR")) else (0.025 * latest_price)
-    if atr <= 0:
-        atr = max(0.5, 0.02 * latest_price)
+    if df is None or len(df) < 2:
+        return {
+            "score": 50, "action": "HOLD", "blinker_class": "blink-dot-yellow", "color": "#FFD600",
+            "move_dir": "⚖️ কনসোলিডেশন", "move_badge": "⚖️ কনসোলিডেশন", "move_color": "#0284c7",
+            "move_bg": "#f0f9ff", "move_border": "#bae6fd", "move_prob": 50.0,
+            "target_price": 0.0, "target_selling_price": 0.0, "target_buying_price": 0.0,
+            "turnaround_floor": 0.0, "next_target": 0.0, "highest_peak": 0.0,
+            "stop_loss": 0.0, "rr_ratio": 1.5, "signals": [], "patterns": []
+        }
 
-    cur_vol = float(latest.get("volume", 0)) if pd.notnull(latest.get("volume")) else 0.0
-    vma20 = float(latest.get("Vol_SMA_20", 0)) if ("Vol_SMA_20" in df.columns and pd.notnull(latest.get("Vol_SMA_20"))) else 0.0
-    vol_ratio = (cur_vol / vma20) if vma20 > 0 else 1.0
+    r5m_val = float(rsi_5m_data.get("rsi_5m", 50.0)) if rsi_5m_data else 50.0
+    lead_pat_name = patterns[0]["name"] if (patterns and len(patterns) > 0) else "No Distinct Pattern"
 
-    signals = []
+    # Direct Single Source of Truth Engine
+    eval_res = evaluate_ticker(
+        ticker=symbol,
+        df_daily=df,
+        rsi_5m_val=r5m_val
+    )
 
-    # 1. Trend Baseline (30 pts)
-    trend_pts = 0
-    ema_20 = float(latest["EMA_20"]) if ("EMA_20" in df.columns and pd.notnull(latest.get("EMA_20"))) else latest_price
-    sma_50 = float(latest["SMA_50"]) if ("SMA_50" in df.columns and pd.notnull(latest.get("SMA_50"))) else ema_20
+    final_score = int(eval_res["score"])
+    sig_raw = str(eval_res["signal"])
+    latest_price = float(eval_res["close"])
+    turnaround_floor = float(eval_res["floor"])
+    next_target = float(eval_res["target"])
 
-    if latest_price >= ema_20:
-        trend_pts += 15
-        signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) >= 20 EMA (Tk {ema_20:.1f}) [+15]"))
-    else:
-        signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 20 EMA (Tk {ema_20:.1f}) [0]"))
-
-    if ema_20 >= sma_50:
-        trend_pts += 15
-        signals.append(("Trend", "Bullish", f"20 EMA (Tk {ema_20:.1f}) >= 50 SMA (Tk {sma_50:.1f}) [Golden Alignment] [+15]"))
-    else:
-        signals.append(("Trend", "Bearish", f"20 EMA (Tk {ema_20:.1f}) < 50 SMA (Tk {sma_50:.1f}) [Death Cross] [0]"))
-
-    # 2. Volume & Liquidity (25 pts)
-    vol_pts = 0
-    if vol_ratio >= 1.5:
-        vol_pts = 25
-        signals.append(("Volume", "Bullish", f"🔥 High-Volume Expansion ({vol_ratio:.2f}x 20 VMA) [+25]"))
-    elif vol_ratio >= 1.0:
-        vol_pts = 15
-        signals.append(("Volume", "Bullish", f"Normal Active Volume ({vol_ratio:.2f}x 20 VMA) [+15]"))
-    else:
-        signals.append(("Volume", "Bearish", f"Low Trading Volume ({vol_ratio:.2f}x 20 VMA < 1.0x) [0]"))
-
-    # 3. Momentum & RSI (25 pts)
-    rsi = float(latest.get("RSI", 50.0)) if ("RSI" in df.columns and pd.notnull(latest.get("RSI"))) else 50.0
-    macd = float(latest.get("MACD", 0.0)) if ("MACD" in df.columns and pd.notnull(latest.get("MACD"))) else 0.0
-    macd_sig = float(latest.get("MACD_Signal", 0.0)) if ("MACD_Signal" in df.columns and pd.notnull(latest.get("MACD_Signal"))) else 0.0
-    macd_bullish = macd >= macd_sig
-
-    candle_trigs = detect_candlestick_triggers(df)
-    has_bull_candle = any(t["bias"] == "Bullish" for t in candle_trigs)
-    has_bear_candle = any(t["bias"] == "Bearish" for t in candle_trigs)
-
-    mom_pts = 0
-    if 45 <= rsi <= 65 and macd_bullish:
-        mom_pts = 25
-        signals.append(("Momentum", "Bullish", f"Daily RSI ({rsi:.1f}) in prime zone (45-65) with positive MACD slope [+25]"))
-    elif 45 <= rsi <= 65:
-        mom_pts = 15
-        signals.append(("Momentum", "Neutral", f"Daily RSI ({rsi:.1f}) in prime zone (45-65) with lagging MACD [+15]"))
-    elif rsi < 35:
-        if has_bull_candle:
-            mom_pts = 15
-            signals.append(("Momentum", "Bullish", f"Oversold Bounce (RSI {rsi:.1f} < 35 with confirmed reversal candle) [+15]"))
-        else:
-            mom_pts = 0
-            signals.append(("Momentum", "Bearish", f"Oversold Freefall (RSI {rsi:.1f} < 35 without reversal trigger) [0]"))
-    elif rsi > 70:
-        mom_pts = 0
-        signals.append(("Momentum", "Warning", f"Overbought Exhaustion (RSI {rsi:.1f} > 70) [0]"))
-    elif 35 <= rsi < 45 or 65 < rsi <= 70:
-        mom_pts = 10 if macd_bullish else 5
-        signals.append(("Momentum", "Neutral", f"RSI ({rsi:.1f}) outside core momentum zone [+{mom_pts}]"))
-    else:
-        mom_pts = 0
-
-    # 4. Pattern Quality (20 pts)
-    pat_pts = 0
-    has_bull_pat = any(p["bias"] == "Bullish" for p in patterns) or has_bull_candle
-    has_bear_pat = any(p["bias"] == "Bearish" for p in patterns) or has_bear_candle
-
-    if has_bull_pat:
-        pat_pts = 20
-        lead_name = patterns[0]["name"] if patterns else (candle_trigs[0]["name"] if candle_trigs else "Bullish Trigger")
-        signals.append(("Pattern", "Bullish", f"📐 Validated Bullish Setup detected: {lead_name} [+20]"))
-    elif has_bear_pat:
-        pat_pts = -15
-        lead_name = patterns[0]["name"] if patterns else (candle_trigs[0]["name"] if candle_trigs else "Bearish Trigger")
-        signals.append(("Pattern", "Bearish", f"📐 Validated Bearish Setup detected: {lead_name} [-15]"))
-    else:
-        signals.append(("Pattern", "Neutral", "No distinct pattern setup [0]"))
-
-    raw_score = trend_pts + vol_pts + mom_pts + pat_pts
-    final_score = int(np.clip(round(raw_score), 0, 100))
-
-    # STRICT Signal Mapping
-    is_expanding_red_vol = (vol_ratio >= 1.2 and float(latest["close"]) < float(latest["open"]))
-    price_below_ema20 = latest_price < ema_20
-
-    if final_score >= 80 and latest_price >= ema_20 and vol_ratio >= 1.3:
-        action, blinker_class, color = "STRONG BUY", "blink-dot-green", "#00C853"
-    elif 65 <= final_score:
-        action, blinker_class, color = "BUY", "blink-dot-green", "#16a34a"
-    elif 45 <= final_score < 65:
-        action, blinker_class, color = "HOLD", "blink-dot-yellow", "#eab308"
-    elif final_score < 45 or (price_below_ema20 and is_expanding_red_vol):
-        if final_score <= 25:
-            action, blinker_class, color = "STRONG SELL", "blink-dot-red", "#dc2626"
-        else:
-            action, blinker_class, color = "SELL", "blink-dot-red", "#ea580c"
-    else:
-        action, blinker_class, color = "HOLD", "blink-dot-yellow", "#eab308"
-
-    # Turnaround Floor (Strict Stop-Loss < Current Price)
-    turnaround_floor = round(max(0.1, latest_price - (1.5 * atr)), 2)
-    if turnaround_floor >= latest_price:
-        turnaround_floor = round(max(0.1, latest_price * 0.96), 2)
-
-    # Next Move Target (> Current Price)
-    next_target = round(latest_price + (2.0 * atr), 2)
-    span_30 = df.tail(min(30, len(df)))
-    res_30 = float(span_30["high"].max())
-    if res_30 > latest_price + (0.5 * atr):
-        next_target = round(min(next_target, res_30), 2)
-    if next_target <= latest_price:
-        next_target = round(latest_price + (1.5 * atr), 2)
-
-    # 60-Day Highest Peak (>= Next Target > Current Price)
-    span_60 = df.tail(min(60, len(df)))
-    highest_peak = max(next_target, round(float(span_60["high"].max()), 2))
-
-    # Assertion Safety Net
-    assert turnaround_floor < latest_price < next_target, f"Boundary error: Floor {turnaround_floor} < Price {latest_price} < Target {next_target}"
-    if final_score < 65:
-        assert action not in ["BUY", "STRONG BUY"], f"Contradiction: Low score {final_score} cannot trigger {action}"
-
-    up_pct = round(((next_target - latest_price) / (latest_price + 1e-9)) * 100, 1)
-    down_pct = round(((latest_price - turnaround_floor) / (latest_price + 1e-9)) * 100, 1)
-
-    if action in ["STRONG BUY", "BUY"]:
-        lead_pat_name = patterns[0]["name"] if patterns else ""
-        pat_str = f" ({lead_pat_name})" if lead_pat_name else ""
+    # Map signals and UI colors consistently
+    if sig_raw in ["STRONG BUY", "BUY"]:
+        action = "BUY"
+        blinker_class = "blink-dot-green"
+        color = "#00C853"
+        up_pct = round(((next_target - latest_price) / (latest_price + 1e-9)) * 100, 1)
+        pat_str = f" ({eval_res['pattern']})" if eval_res['pattern'] != "No Distinct Pattern" else ""
         move_dir = f"📈 দাম বাড়বে{pat_str} — লক্ষ্যমাত্রা Tk {next_target:.2f} (+{up_pct:.1f}%)"
         move_badge = f"📈 বাড়বে → Tk {next_target:.2f} (+{up_pct:.1f}%)"
         move_color = "#15803d"
         move_bg = "#f0fdf4"
         move_border = "#86efac"
-        move_prob = min(94.0, round(65.0 + (final_score - 65) * 0.8, 1))
-    elif action in ["SELL", "STRONG SELL"]:
+        move_prob = min(94.0, round(65.0 + (final_score - 55) * 0.7, 1))
+    elif sig_raw in ["SELL", "STRONG SELL"]:
+        action = "SELL"
+        blinker_class = "blink-dot-red"
+        color = "#D50000"
+        down_pct = round(((latest_price - turnaround_floor) / (latest_price + 1e-9)) * 100, 1)
         move_dir = f"📉 দাম কমবে — রিভার্সাল ফ্লোর Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
         move_badge = f"📉 কমবে → Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
         move_color = "#b91c1c"
         move_bg = "#fef2f2"
         move_border = "#fca5a5"
-        move_prob = min(94.0, round(65.0 + (45 - final_score) * 0.8, 1))
+        move_prob = min(94.0, round(65.0 + (40 - final_score) * 0.8, 1))
     else:
+        action = "HOLD"
+        blinker_class = "blink-dot-yellow"
+        color = "#FFD600"
         move_dir = f"⚖️ কনসোলিডেশন (রেঞ্জ: Tk {turnaround_floor:.1f} – {next_target:.1f})"
         move_badge = f"⚖️ রেঞ্জ: {turnaround_floor:.1f}–{next_target:.1f}"
         move_color = "#0284c7"
@@ -3536,10 +3444,42 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list, rsi_5m_data: dict =
         move_border = "#bae6fd"
         move_prob = 50.0
 
-    stop_l = turnaround_floor
-    risk = abs(latest_price - stop_l)
-    reward = abs(next_target - latest_price)
-    rr_ratio = round(reward / (risk + 1e-9), 2)
+    # Calculate Breakdown Signals
+    signals = []
+    latest = df.iloc[-1]
+    ema_20 = float(eval_res.get("ema_20", latest_price))
+    if latest_price >= ema_20:
+        signals.append(("Trend", "Bullish", f"Price (Tk {latest_price:.1f}) >= 20 EMA (Tk {ema_20:.1f})"))
+    else:
+        signals.append(("Trend", "Bearish", f"Price (Tk {latest_price:.1f}) < 20 EMA (Tk {ema_20:.1f})"))
+
+    vol_r = float(eval_res.get("vol_ratio", 1.0))
+    if vol_r >= 1.3:
+        signals.append(("Volume", "Bullish", f"🔥 High-Volume Expansion ({vol_r:.2f}x 20 VMA)"))
+    elif vol_r >= 0.9:
+        signals.append(("Volume", "Neutral", f"Normal Volume ({vol_r:.2f}x 20 VMA)"))
+    else:
+        signals.append(("Volume", "Bearish", f"Low Volume ({vol_r:.2f}x 20 VMA)"))
+
+    rsi_1d = float(eval_res.get("rsi_1d", 50.0))
+    if 45 <= rsi_1d <= 65:
+        signals.append(("Momentum", "Bullish", f"Daily RSI ({rsi_1d:.1f}) in Prime Momentum Zone"))
+    elif rsi_1d < 35:
+        signals.append(("Momentum", "Neutral", f"Daily RSI ({rsi_1d:.1f}) in Oversold Accumulation Zone"))
+    elif rsi_1d > 70:
+        signals.append(("Momentum", "Warning", f"Daily RSI ({rsi_1d:.1f}) in Overbought Zone"))
+
+    if eval_res["pattern"] != "No Distinct Pattern":
+        signals.append(("Pattern", "Bullish" if eval_res["pattern_bias"] == "Bullish" else "Bearish", f"📐 Pattern: {eval_res['pattern']}"))
+
+    # Peak & Risk/Reward
+    span_60 = df.tail(min(60, len(df)))
+    high_col = 'High' if 'High' in span_60.columns else ('high' if 'high' in span_60.columns else None)
+    highest_peak = max(next_target, round(float(span_60[high_col].max()), 2)) if high_col else next_target
+
+    risk = max(0.05, abs(latest_price - turnaround_floor))
+    reward = max(0.05, abs(next_target - latest_price))
+    rr_ratio = round(reward / risk, 2)
 
     return {
         "score": final_score,
@@ -3558,10 +3498,10 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list, rsi_5m_data: dict =
         "turnaround_floor": turnaround_floor,
         "next_target": next_target,
         "highest_peak": highest_peak,
-        "stop_loss": stop_l,
+        "stop_loss": turnaround_floor,
         "rr_ratio": rr_ratio,
         "signals": signals,
-        "patterns": patterns
+        "patterns": patterns or []
     }
 
 # ----------------- BEST 15 SURE SHOT 30-DAY GAIN ENGINE ----------------- #
@@ -3685,7 +3625,7 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
     
     # Unified Stock Setup & Quantitative Pipeline (SSOT Engine)
     stock_setup = evaluate_ticker(sym, df_h, rsi_5m_val=rsi_5m_val)
-    signals_data = evaluate_stock_signals(analyzed, patterns, r5m_data)
+    signals_data = evaluate_stock_signals(analyzed, patterns, r5m_data, symbol=sym)
 
     rsi_val = stock_setup["rsi_1d"]
     rsi_5m_val = float(r5m_data.get("rsi_5m", 50.0))
@@ -4584,7 +4524,7 @@ def seed_authentic_historical_audits():
 
                     df_ind = compute_all_indicators(df_slice)
                     patterns = detect_chart_patterns(df_ind)
-                    decision = evaluate_stock_signals(df_ind, patterns)
+                    decision = evaluate_stock_signals(df_ind, patterns, symbol=sym)
 
                     score = int(decision.get("score", 0))
                     atr = float(df_ind["ATR"].iloc[-1]) if ("ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (prev_close * 0.025)
@@ -5357,7 +5297,7 @@ Mathematical Ordering: S3 &lt; S2 &lt; S1 &lt; C &lt; R1 &lt; R2 &lt; R3
             quote_sel["ycp"], 
             quote_sel["volume"]
         )
-        decision = evaluate_stock_signals(df_analyzed, detected_patterns, sel_r5m)
+        decision = evaluate_stock_signals(df_analyzed, detected_patterns, sel_r5m, symbol=selected_symbol)
 
         # 1. Summary Metrics & Trade Setup Card
         st.subheader(f"📊 Detailed Technical & Pattern Inspector: {selected_symbol}")
