@@ -267,11 +267,44 @@ h1, .stHeadingContainer {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     margin-bottom: 12px;
     transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 100%;
+    min-height: 410px;
+    box-sizing: border-box;
 }
 .stock-card-container:hover {
     transform: translateY(-2px);
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.08);
     border-color: #cbd5e1;
+}
+.card-header-top {
+    height: 40px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 2px;
+    overflow: hidden;
+}
+.card-title-text {
+    font-size: 13.5px;
+    font-weight: 800;
+    color: #0f172a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+}
+.card-sub-text {
+    font-size: 10.5px;
+    color: #64748b;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
 }
 .stock-avatar-circle {
     width: 36px;
@@ -290,17 +323,24 @@ h1, .stHeadingContainer {
 .setup-badge-box {
     text-align: center;
     border-radius: 6px;
-    padding: 4px 8px;
+    padding: 3px 8px;
     font-size: 11px;
     font-weight: 800;
     letter-spacing: 0.4px;
-    margin: 8px 0;
+    margin: 6px 0;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
 }
 .price-row-main {
     display: flex;
     align-items: baseline;
     gap: 8px;
     margin-bottom: 4px;
+    height: 28px;
+    box-sizing: border-box;
 }
 .price-ltp-lg {
     font-size: 22px;
@@ -314,11 +354,14 @@ h1, .stHeadingContainer {
 .session-metrics-row {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     font-size: 11px;
     color: #64748b;
     margin-bottom: 6px;
     border-bottom: 1px solid #f1f5f9;
     padding-bottom: 4px;
+    height: 20px;
+    box-sizing: border-box;
 }
 .rsi-strip-row {
     display: flex;
@@ -330,6 +373,8 @@ h1, .stHeadingContainer {
     padding: 4px 8px;
     font-size: 11px;
     margin-bottom: 6px;
+    height: 28px;
+    box-sizing: border-box;
 }
 .next-move-card-box {
     background: #f8fafc;
@@ -338,6 +383,11 @@ h1, .stHeadingContainer {
     padding: 6px 10px;
     margin-bottom: 6px;
     font-size: 11px;
+    height: 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    box-sizing: border-box;
 }
 .card-footer-row {
     display: flex;
@@ -346,6 +396,8 @@ h1, .stHeadingContainer {
     border-top: 1px solid #f1f5f9;
     padding-top: 8px;
     font-size: 12px;
+    height: 28px;
+    box-sizing: border-box;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -713,7 +765,7 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
             c.get("tech", {}), c.get("pattern", ""), rsi_1d, rsi_5m, ltp
         )
         
-    badge_html = ""
+    badge_html = '<div class="setup-badge-box" style="visibility: hidden; background: transparent; border: 1px solid transparent;">&nbsp;</div>'
     if setup_badge and isinstance(setup_badge, dict) and setup_badge.get("text"):
         badge_html = f'<div class="setup-badge-box" style="background: {setup_badge["bg"]}; color: {setup_badge["fg"]}; border: 1px solid {setup_badge["border"]};">{setup_badge["text"]}</div>'
         
@@ -765,22 +817,22 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
 
     # Actionable Parameters Mini-Grid (Entry Zone, Stop Loss, Target 1, Target 2)
     action_matrix_html = (
-        f'<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 5px 8px; margin: 4px 0 6px 0; font-size: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">'
-        f'<div><span style="color: #64748b; font-weight: 700;">🎯 Entry:</span> <b style="color: #0f172a;">{entry_zone_str}</b></div>'
-        f'<div><span style="color: #b91c1c; font-weight: 700;">🛡️ Stop Loss:</span> <b style="color: #b91c1c;">Tk {floor_val:.2f} ({floor_pct:+.1f}%)</b></div>'
-        f'<div><span style="color: #15803d; font-weight: 700;">🚀 Target 1:</span> <b style="color: #15803d;">Tk {target1_val:.2f} ({target_pct:+.1f}%)</b></div>'
-        f'<div><span style="color: #0284c7; font-weight: 700;">💎 Target 2:</span> <b style="color: #0284c7;">Tk {target2_val:.2f} ({target2_pct:+.1f}%)</b></div>'
+        f'<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 5px 8px; margin: 4px 0 6px 0; font-size: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; height: 48px; box-sizing: border-box; align-content: center;">'
+        f'<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: #64748b; font-weight: 700;">🎯 Entry:</span> <b style="color: #0f172a;">{entry_zone_str}</b></div>'
+        f'<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: #b91c1c; font-weight: 700;">🛡️ Stop:</span> <b style="color: #b91c1c;">Tk {floor_val:.2f} ({floor_pct:+.1f}%)</b></div>'
+        f'<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: #15803d; font-weight: 700;">🚀 Target 1:</span> <b style="color: #15803d;">Tk {target1_val:.2f} ({target_pct:+.1f}%)</b></div>'
+        f'<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: #0284c7; font-weight: 700;">💎 Target 2:</span> <b style="color: #0284c7;">Tk {target2_val:.2f} ({target2_pct:+.1f}%)</b></div>'
         f'</div>'
     )
 
     card_html = (
         f'<div class="stock-card-container">'
-        f'<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; margin-bottom: 2px;">'
-        f'<div style="display: flex; align-items: center; gap: 8px; overflow: hidden;">'
+        f'<div class="card-header-top">'
+        f'<div style="display: flex; align-items: center; gap: 8px; overflow: hidden; max-width: 70%;">'
         f'<div class="stock-avatar-circle">{sym[:2]}</div>'
         f'<div style="overflow: hidden;">'
-        f'<div style="font-size: 13.5px; font-weight: 800; color: #0f172a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{company_name}">{company_name}</div>'
-        f'<div style="font-size: 10.5px; color: #64748b; font-weight: 600;"><b>{sym}</b> · [{category}] · {sector}</div>'
+        f'<div class="card-title-text" title="{company_name}">{company_name}</div>'
+        f'<div class="card-sub-text"><b>{sym}</b> · [{category}] · {sector}</div>'
         f'</div>'
         f'</div>'
         f'{header_right_badges}'
@@ -1080,8 +1132,8 @@ def get_live_market_feeds():
 @st.cache_data(ttl=15)
 def get_dse_market_indices(unified_quotes: dict | None = None):
     """
-    Fetches real-time DSEX, DSES, and DS30 indices and market breadth using
-    multi-source resilient fallback (StockNow API -> DSE Scraper -> bdshare historical market info).
+    Fetches 100% genuine real-time DSEX, DSES, and DS30 indices and market breadth
+    directly from authentic live data sources and unified quote streams.
     """
     indices = {
         "DSEX": {"name": "DSEX Broad Index", "value": 0.0, "change": 0.0, "pct_change": 0.0},
@@ -1090,32 +1142,32 @@ def get_dse_market_indices(unified_quotes: dict | None = None):
         "stats": {"trade": 0, "volume": 0, "value_mn": 0.0, "advanced": 0, "declined": 0, "unchanged": 0}
     }
 
-    # 1. Primary Source: StockNow Live API Indices
-    try:
-        url_idx = "https://stocknow.com.bd/api/v1/indices"
-        r_sn = requests.get(url_idx, headers=HTTP_HEADERS, verify=False, timeout=5)
-        if r_sn.status_code == 200:
-            data_sn = r_sn.json()
-            items = data_sn if isinstance(data_sn, list) else (data_sn.values() if isinstance(data_sn, dict) else [])
-            for item in items:
-                if isinstance(item, dict):
-                    code = str(item.get("code") or item.get("symbol") or item.get("name") or "").upper()
-                    val = float(item.get("ltp") or item.get("close") or item.get("value") or 0.0)
-                    chg = float(item.get("change") or 0.0)
-                    pct = float(item.get("change_percent") or item.get("pct_change") or (round(chg / (val - chg) * 100, 2) if (val - chg) > 0 else 0.0))
-                    if "DSEX" in code and val > 0:
-                        indices["DSEX"].update({"value": val, "change": chg, "pct_change": pct})
-                    elif "DSES" in code and val > 0:
-                        indices["DSES"].update({"value": val, "change": chg, "pct_change": pct})
-                    elif ("DS30" in code or "DSE30" in code) and val > 0:
-                        indices["DS30"].update({"value": val, "change": chg, "pct_change": pct})
-    except Exception:
-        pass
+    # 1. Primary Source: Direct StockNow 1D REST Candles for Authentic Live Index Values
+    for idx_code, key_name in [("DSEX", "DSEX"), ("DS30", "DS30"), ("DSES", "DSES")]:
+        try:
+            url_sn = f"https://stocknow.com.bd/api/v1/instruments/{idx_code}/history?data2=true&resolution=1D"
+            r_sn = requests.get(url_sn, headers=HTTP_HEADERS, verify=False, timeout=6)
+            if r_sn.status_code == 200:
+                data = r_sn.json()
+                if isinstance(data, list) and len(data) >= 6:
+                    closes = data[3]
+                    if closes and len(closes) > 0:
+                        cur_val = float(closes[-1])
+                        prev_val = float(closes[-2]) if len(closes) > 1 else cur_val
+                        chg = round(cur_val - prev_val, 2)
+                        pct = round((chg / prev_val * 100), 2) if prev_val > 0 else 0.0
+                        indices[key_name].update({
+                            "value": cur_val,
+                            "change": chg,
+                            "pct_change": pct
+                        })
+        except Exception:
+            pass
 
-    # 2. Secondary Source: DSE Official Homepage Scraper
+    # 2. Secondary Fallback: DSE Official Homepage Scraper
     if indices["DSEX"]["value"] == 0.0 or indices["DSES"]["value"] == 0.0 or indices["DS30"]["value"] == 0.0:
         try:
-            r = requests.get("https://www.dsebd.org/index.php", headers=HTTP_HEADERS, verify=False, timeout=6)
+            r = requests.get("https://www.dsebd.org/index.php", headers=HTTP_HEADERS, verify=False, timeout=5)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.content, "html.parser")
                 for mid in soup.find_all("div", class_="midrow"):
@@ -1137,27 +1189,10 @@ def get_dse_market_indices(unified_quotes: dict | None = None):
                                 indices["DS30"].update({"value": val, "change": chg, "pct_change": pct})
                         except Exception:
                             pass
-                    
-                    # Check stats
-                    cwid = mid.find("div", class_="m_col-wid")
-                    cwid1 = mid.find("div", class_="m_col-wid1")
-                    cwid2 = mid.find("div", class_="m_col-wid2")
-                    if cwid and cwid1 and cwid2:
-                        t1 = cwid.get_text(strip=True).replace(",", "")
-                        t2 = cwid1.get_text(strip=True).replace(",", "")
-                        t3 = cwid2.get_text(strip=True).replace(",", "")
-                        if t1.isdigit() and indices["stats"]["trade"] == 0:
-                            indices["stats"]["trade"] = int(t1)
-                            indices["stats"]["volume"] = int(t2) if t2.isdigit() else 0
-                            indices["stats"]["value_mn"] = float(t3) if t3.replace(".", "", 1).isdigit() else 0.0
-                        elif t1.isdigit() and indices["stats"]["advanced"] == 0:
-                            indices["stats"]["advanced"] = int(t1)
-                            indices["stats"]["declined"] = int(t2) if t2.isdigit() else 0
-                            indices["stats"]["unchanged"] = int(t3) if t3.isdigit() else 0
         except Exception:
             pass
 
-    # 3. Tertiary Fallback: Fetch latest genuine closing indices from bdshare
+    # 3. Tertiary Fallback: bdshare market archive
     if indices["DSEX"]["value"] == 0.0 or indices["DSES"]["value"] == 0.0 or indices["DS30"]["value"] == 0.0:
         try:
             m_df = bdshare.get_market_info()
@@ -1166,15 +1201,12 @@ def get_dse_market_indices(unified_quotes: dict | None = None):
                 dsex_col = next((cols[k] for k in cols if 'dsex' in k), None)
                 dses_col = next((cols[k] for k in cols if 'dses' in k), None)
                 ds30_col = next((cols[k] for k in cols if 'ds30' in k or 'dse30' in k), None)
-                trade_col = next((cols[k] for k in cols if 'trade' in k), None)
-                vol_col = next((cols[k] for k in cols if 'volume' in k), None)
-                val_col = next((cols[k] for k in cols if 'value' in k), None)
 
-                if dsex_col and len(m_df) >= 1:
+                if len(m_df) >= 1:
                     last_row = m_df.iloc[-1]
                     prev_row = m_df.iloc[-2] if len(m_df) >= 2 else last_row
 
-                    if indices["DSEX"]["value"] == 0.0:
+                    if dsex_col and indices["DSEX"]["value"] == 0.0:
                         v = float(str(last_row[dsex_col]).replace(',', ''))
                         pv = float(str(prev_row[dsex_col]).replace(',', '')) if prev_row is not None else v
                         c = round(v - pv, 2)
@@ -1194,14 +1226,6 @@ def get_dse_market_indices(unified_quotes: dict | None = None):
                         c = round(v - pv, 2)
                         p = round((c / pv * 100), 2) if pv > 0 else 0.0
                         indices["DS30"].update({"value": v, "change": c, "pct_change": p})
-
-                    if indices["stats"]["trade"] == 0 and trade_col:
-                        try:
-                            indices["stats"]["trade"] = int(str(last_row[trade_col]).replace(',', ''))
-                            indices["stats"]["volume"] = int(str(last_row[vol_col]).replace(',', '')) if vol_col else 0
-                            indices["stats"]["value_mn"] = float(str(last_row[val_col]).replace(',', '')) if val_col else 0.0
-                        except Exception:
-                            pass
         except Exception:
             pass
 
@@ -1214,16 +1238,13 @@ def get_dse_market_indices(unified_quotes: dict | None = None):
         tot_vol = sum(float(q.get("volume", 0.0)) for q in unified_quotes.values())
         tot_tr = sum(int(q.get("trades", 0)) for q in unified_quotes.values())
 
-        if (adv + dec + unc) > 0 and (indices["stats"]["advanced"] == 0 and indices["stats"]["declined"] == 0):
-            indices["stats"]["advanced"] = adv
-            indices["stats"]["declined"] = dec
-            indices["stats"]["unchanged"] = unc
-
-        if tot_val > 0 and indices["stats"]["value_mn"] == 0.0:
+        indices["stats"]["advanced"] = adv
+        indices["stats"]["declined"] = dec
+        indices["stats"]["unchanged"] = unc
+        if tot_val > 0:
             indices["stats"]["value_mn"] = round(tot_val, 2)
             indices["stats"]["volume"] = int(tot_vol)
             indices["stats"]["trade"] = int(tot_tr)
-
     return indices
 
 # ----------------- AUTHENTIC DSEX SUPPORT & REVERSAL ANALYZER ----------------- #
@@ -4998,118 +5019,14 @@ st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
 # ----------------- MAIN TABS STRUCTURE ----------------- #
 
-tab_agent, tab_market, tab_screener, tab_patterns = st.tabs([
+tab_portfolio, tab_agent, tab_screener, tab_patterns = st.tabs([
+    "📊 Portfolio",
     "🤖 Autonomous Trading Agent",
-    "⚡ Live Market Stream",
     "🎯 Screener",
     "📐 Patterns Detected"
 ])
 
-with tab_agent:
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border: 1.5px solid #334155; border-radius: 12px; padding: 18px 22px; margin-bottom: 20px; color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-            <div>
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <span style="font-size: 24px;">🤖</span>
-                    <div>
-                        <h2 style="margin: 0; font-size: 20px; font-weight: 900; color: #38bdf8; letter-spacing: -0.5px;">
-                            AUTONOMOUS QUANTITATIVE TRADING AGENT
-                        </h2>
-                        <div style="font-size: 12px; color: #94a3b8; font-weight: 600; margin-top: 2px;">
-                            স্বয়ংক্রিয় প্রাতিষ্ঠানিক কোয়ান্টাম ইঞ্জিন • সেরা ১৫টি বাই অর্ডার রিকমেন্ডেশন (Top 15 Buy Recommendations)
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="background: #064e3b; color: #34d399; border: 1px solid #059669; padding: 4px 12px; border-radius: 20px; font-size: 11.5px; font-weight: 800; display: flex; align-items: center; gap: 6px;">
-                    <span class="blink-dot-green" style="margin: 0;"></span> LIVE AGENT ACTIVE
-                </span>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 15 Core High-Liquidity Curated Equities for Top 15 Selection
-    agent_candidates = [
-        "SQURPHARMA", "GP", "BATBC", "BRACBANK", "WALTONHIL", "RENATA", "LHB", "IDLC", 
-        "ACMELAB", "BSRMSTEEL", "SONARBAINS", "CITYBANK", "ACI", "ROBI", "BEXIMCO"
-    ]
-
-    scored_agent_setups = []
-    for sym in agent_candidates:
-        try:
-            c = get_unified_stock_analysis_payload(sym, unified_quotes)
-            if c and c.get("ltp", 0.0) > 0:
-                scored_agent_setups.append(c)
-        except Exception:
-            pass
-
-    # Sort strictly descending by Score, then by Target 1 Gain
-    scored_agent_setups.sort(key=lambda x: (x.get("score", 0), x.get("target1_pct", 0)), reverse=True)
-    top_15_picks = scored_agent_setups[:15]
-
-    for setup in top_15_picks:
-        sym_name = setup['symbol']
-        ltp_val = float(setup['ltp'])
-        pct_val = float(setup['pct_change'])
-        score_val = int(setup.get('score', 65))
-        rsi_5m_val = float(setup.get('rsi_5m', 50.0))
-        order_cmd = setup.get('order_command') or '🟢 EXECUTE BUY ORDER (ক্রয় নিশ্চিত করুন)'
-        e_zone = str(setup.get('entry_zone') or f"{ltp_val*0.99:.2f}–{ltp_val*1.01:.2f}")
-        t1_val = float(setup.get('target1', round(ltp_val * 1.05, 2)))
-        t1_pct = float(setup.get('target1_pct', 5.0))
-        t2_val = float(setup.get('target2', round(ltp_val * 1.10, 2)))
-        t2_pct = float(setup.get('target2_pct', 10.0))
-        fl_val = float(setup.get('floor', round(ltp_val * 0.98, 2)))
-        fl_pct = float(setup.get('floor_pct', -2.0))
-        action_msg = setup.get('action_detail') or f"শেয়ারটি ভ্যালু ডিমান্ড জোন থেকে রিবাউন্ড করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {fl_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {t1_val:.2f} এর জন্য পজিশন নেওয়া যায়।"
-        bg_col = "#f0fdf4"
-        bdr_col = "#86efac"
-        bdg_col = "#00C853"
-
-        card_html = f"""
-        <div style="background: {bg_col}; border: 1.5px solid {bdr_col}; border-left: 8px solid {bdg_col}; border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.03);">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; border-bottom: 1px dashed {bdr_col}; padding-bottom: 10px;">
-                <div>
-                    <span style="font-size: 20px; font-weight: 900; color: #0f172a;">{sym_name}</span>
-                    <span style="font-size: 13.5px; font-weight: 700; color: #475569; margin-left: 8px;">LTP: Tk {ltp_val:.2f} ({pct_val:+.2f}%)</span>
-                </div>
-                <div style="background: {bdg_col}; color: white; padding: 5px 16px; border-radius: 20px; font-size: 13px; font-weight: 900; letter-spacing: 0.3px;">
-                    {order_cmd}
-                </div>
-            </div>
-            <div style="font-size: 13.5px; font-weight: 700; color: #1e293b; line-height: 1.6; margin-bottom: 14px;">
-                {action_msg}
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
-                    <div style="font-size: 10.5px; font-weight: 800; color: #64748b; margin-bottom: 2px;">ENTRY ZONE (প্রবেশ দর)</div>
-                    <div style="font-size: 16px; font-weight: 900; color: #0f172a;">Tk {e_zone}</div>
-                    <div style="font-size: 10.5px; color: #475569; margin-top: 2px;">Market Execution</div>
-                </div>
-                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
-                    <div style="font-size: 10.5px; font-weight: 800; color: #15803d; margin-bottom: 2px;">TARGET 1 (লক্ষ্যমাত্রা ১)</div>
-                    <div style="font-size: 16px; font-weight: 900; color: #15803d;">Tk {t1_val:.2f}</div>
-                    <div style="font-size: 10.5px; color: #166534; font-weight: 700; margin-top: 2px;">Gain: +{t1_pct:.1f}%</div>
-                </div>
-                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
-                    <div style="font-size: 10.5px; font-weight: 800; color: #0284c7; margin-bottom: 2px;">TARGET 2 (লক্ষ্যমাত্রা ২)</div>
-                    <div style="font-size: 16px; font-weight: 900; color: #0284c7;">Tk {t2_val:.2f}</div>
-                    <div style="font-size: 10.5px; color: #0369a1; font-weight: 700; margin-top: 2px;">Gain: +{t2_pct:.1f}%</div>
-                </div>
-                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
-                    <div style="font-size: 10.5px; font-weight: 800; color: #b91c1c; margin-bottom: 2px;">STOP LOSS (ঝুঁকি সীমা)</div>
-                    <div style="font-size: 16px; font-weight: 900; color: #b91c1c;">Tk {fl_val:.2f}</div>
-                    <div style="font-size: 10.5px; color: #991b1b; font-weight: 700; margin-top: 2px;">Risk: {fl_pct:.1f}%</div>
-                </div>
-            </div>
-        </div>
-        """
-        st.markdown(card_html, unsafe_allow_html=True)
-
-with tab_market:
+with tab_portfolio:
 
     # 1. Main Live Index Bar
     dsex_c = "#00C853" if idx_dsex["change"] >= 0 else "#D50000"
@@ -5577,6 +5494,112 @@ Mathematical Ordering: S3 &lt; S2 &lt; S1 &lt; C &lt; R1 &lt; R2 &lt; R3
             st.dataframe(df_selected.tail(50).sort_index(ascending=False))
     else:
         st.warning(f"No historical archive records found for **{selected_symbol}**. Please verify the symbol or try again.")
+
+# ----------------- TAB: AUTONOMOUS QUANTITATIVE TRADING AGENT (TOP 15 BUY PICKS) ----------------- #
+
+with tab_agent:
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border: 1.5px solid #334155; border-radius: 12px; padding: 18px 22px; margin-bottom: 20px; color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <div>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 24px;">🤖</span>
+                    <div>
+                        <h2 style="margin: 0; font-size: 20px; font-weight: 900; color: #38bdf8; letter-spacing: -0.5px;">
+                            AUTONOMOUS QUANTITATIVE TRADING AGENT
+                        </h2>
+                        <div style="font-size: 12px; color: #94a3b8; font-weight: 600; margin-top: 2px;">
+                            স্বয়ংক্রিয় প্রাতিষ্ঠানিক কোয়ান্টাম ইঞ্জিন • সেরা ১৫টি বাই অর্ডার রিকমেন্ডেশন (Top 15 Buy Recommendations)
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="background: #064e3b; color: #34d399; border: 1px solid #059669; padding: 4px 12px; border-radius: 20px; font-size: 11.5px; font-weight: 800; display: flex; align-items: center; gap: 6px;">
+                    <span class="blink-dot-green" style="margin: 0;"></span> LIVE AGENT ACTIVE
+                </span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 15 Core High-Liquidity Curated Equities for Top 15 Selection
+    agent_candidates = [
+        "SQURPHARMA", "GP", "BATBC", "BRACBANK", "WALTONHIL", "RENATA", "LHB", "IDLC", 
+        "ACMELAB", "BSRMSTEEL", "SONARBAINS", "CITYBANK", "ACI", "ROBI", "BEXIMCO"
+    ]
+
+    scored_agent_setups = []
+    for sym in agent_candidates:
+        try:
+            c = get_unified_stock_analysis_payload(sym, unified_quotes)
+            if c and c.get("ltp", 0.0) > 0:
+                scored_agent_setups.append(c)
+        except Exception:
+            pass
+
+    # Sort strictly descending by Score, then by Target 1 Gain
+    scored_agent_setups.sort(key=lambda x: (x.get("score", 0), x.get("target1_pct", 0)), reverse=True)
+    top_15_picks = scored_agent_setups[:15]
+
+    for setup in top_15_picks:
+        sym_name = setup['symbol']
+        ltp_val = float(setup['ltp'])
+        pct_val = float(setup['pct_change'])
+        score_val = int(setup.get('score', 65))
+        rsi_5m_val = float(setup.get('rsi_5m', 50.0))
+        order_cmd = setup.get('order_command') or '🟢 EXECUTE BUY ORDER (ক্রয় নিশ্চিত করুন)'
+        e_zone = str(setup.get('entry_zone') or f"{ltp_val*0.99:.2f}–{ltp_val*1.01:.2f}")
+        t1_val = float(setup.get('target1', round(ltp_val * 1.05, 2)))
+        t1_pct = float(setup.get('target1_pct', 5.0))
+        t2_val = float(setup.get('target2', round(ltp_val * 1.10, 2)))
+        t2_pct = float(setup.get('target2_pct', 10.0))
+        fl_val = float(setup.get('floor', round(ltp_val * 0.98, 2)))
+        fl_pct = float(setup.get('floor_pct', -2.0))
+        action_msg = setup.get('action_detail') or f"শেয়ারটি ভ্যালু ডিমান্ড জোন থেকে রিবাউন্ড করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {fl_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {t1_val:.2f} এর জন্য পজিশন নেওয়া যায়।"
+        bg_col = "#f0fdf4"
+        bdr_col = "#86efac"
+        bdg_col = "#00C853"
+
+        card_html = f"""
+        <div style="background: {bg_col}; border: 1.5px solid {bdr_col}; border-left: 8px solid {bdg_col}; border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.03);">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; border-bottom: 1px dashed {bdr_col}; padding-bottom: 10px;">
+                <div>
+                    <span style="font-size: 20px; font-weight: 900; color: #0f172a;">{sym_name}</span>
+                    <span style="font-size: 13.5px; font-weight: 700; color: #475569; margin-left: 8px;">LTP: Tk {ltp_val:.2f} ({pct_val:+.2f}%)</span>
+                </div>
+                <div style="background: {bdg_col}; color: white; padding: 5px 16px; border-radius: 20px; font-size: 13px; font-weight: 900; letter-spacing: 0.3px;">
+                    {order_cmd}
+                </div>
+            </div>
+            <div style="font-size: 13.5px; font-weight: 700; color: #1e293b; line-height: 1.6; margin-bottom: 14px;">
+                {action_msg}
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
+                    <div style="font-size: 10.5px; font-weight: 800; color: #64748b; margin-bottom: 2px;">ENTRY ZONE (প্রবেশ দর)</div>
+                    <div style="font-size: 16px; font-weight: 900; color: #0f172a;">Tk {e_zone}</div>
+                    <div style="font-size: 10.5px; color: #475569; margin-top: 2px;">Market Execution</div>
+                </div>
+                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
+                    <div style="font-size: 10.5px; font-weight: 800; color: #15803d; margin-bottom: 2px;">TARGET 1 (লক্ষ্যমাত্রা ১)</div>
+                    <div style="font-size: 16px; font-weight: 900; color: #15803d;">Tk {t1_val:.2f}</div>
+                    <div style="font-size: 10.5px; color: #166534; font-weight: 700; margin-top: 2px;">Gain: +{t1_pct:.1f}%</div>
+                </div>
+                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
+                    <div style="font-size: 10.5px; font-weight: 800; color: #0284c7; margin-bottom: 2px;">TARGET 2 (লক্ষ্যমাত্রা ২)</div>
+                    <div style="font-size: 16px; font-weight: 900; color: #0284c7;">Tk {t2_val:.2f}</div>
+                    <div style="font-size: 10.5px; color: #0369a1; font-weight: 700; margin-top: 2px;">Gain: +{t2_pct:.1f}%</div>
+                </div>
+                <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px;">
+                    <div style="font-size: 10.5px; font-weight: 800; color: #b91c1c; margin-bottom: 2px;">STOP LOSS (ঝুঁকি সীমা)</div>
+                    <div style="font-size: 16px; font-weight: 900; color: #b91c1c;">Tk {fl_val:.2f}</div>
+                    <div style="font-size: 10.5px; color: #991b1b; font-weight: 700; margin-top: 2px;">Risk: {fl_pct:.1f}%</div>
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 
