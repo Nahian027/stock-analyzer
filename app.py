@@ -359,7 +359,7 @@ WATCHLIST_STOCKS = [
     {"symbol": "BATBC", "name": "British American Tobacco BD", "category": "A", "sector": "Food & Allied"},
     {"symbol": "BRACBANK", "name": "BRAC Bank Ltd.", "category": "A", "sector": "Bank"},
     {"symbol": "IDLC", "name": "IDLC Finance Ltd.", "category": "A", "sector": "Financial Inst."},
-    {"symbol": "LHBL", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
+    {"symbol": "LHB", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
     {"symbol": "WALTONHIL", "name": "Walton Hi-Tech Industries", "category": "A", "sector": "Engineering"},
     {"symbol": "SONARBAINS", "name": "Sonar Bangla Insurance Ltd.", "category": "A", "sector": "Insurance"}
 ]
@@ -372,7 +372,9 @@ STOCK_METADATA_DICT = {
     "BATBC": {"symbol": "BATBC", "name": "British American Tobacco BD", "category": "A", "sector": "Food & Allied"},
     "BRACBANK": {"symbol": "BRACBANK", "name": "BRAC Bank Ltd.", "category": "A", "sector": "Bank"},
     "IDLC": {"symbol": "IDLC", "name": "IDLC Finance Ltd.", "category": "A", "sector": "Financial Inst."},
-    "LHBL": {"symbol": "LHBL", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
+    "LHB": {"symbol": "LHB", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
+    "LHBL": {"symbol": "LHB", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
+    "LAFSURCEML": {"symbol": "LHB", "name": "LafargeHolcim Bangladesh PLC", "category": "A", "sector": "Cement"},
     "WALTONHIL": {"symbol": "WALTONHIL", "name": "Walton Hi-Tech Industries", "category": "A", "sector": "Engineering"},
     "SONARBAINS": {"symbol": "SONARBAINS", "name": "Sonar Bangla Insurance Ltd.", "category": "A", "sector": "Insurance"},
     "RENATA": {"symbol": "RENATA", "name": "Renata PLC", "category": "A", "sector": "Pharma & Chemical"},
@@ -1057,6 +1059,14 @@ def get_live_market_feeds():
         primary = sn if sn is not None else ds
         if primary:
             unified[s] = primary
+
+    # Mirror known ticker aliases (e.g. LHB <-> LHBL, LAFSURCEML)
+    alias_pairs = [("LHB", "LHBL"), ("LHB", "LAFSURCEML")]
+    for canonical, alias in alias_pairs:
+        if canonical in unified and alias not in unified:
+            unified[alias] = {**unified[canonical], "symbol": alias}
+        elif alias in unified and canonical not in unified:
+            unified[canonical] = {**unified[alias], "symbol": canonical}
 
     return {
         "unified": unified,
@@ -2015,10 +2025,11 @@ def fetch_authentic_history(symbol: str, days: int = 365) -> pd.DataFrame:
     Filters out non-trading off-days where open, high, or low is zero.
     """
     symbol = symbol.upper().strip()
+    sym_query = "LHB" if symbol in ["LHBL", "LAFSURCEML"] else symbol
     
     # 1. Primary Source: StockNow Authentic 1D Candle API
     try:
-        url_sn = f"https://stocknow.com.bd/api/v1/instruments/{symbol}/history?data2=true&resolution=1D"
+        url_sn = f"https://stocknow.com.bd/api/v1/instruments/{sym_query}/history?data2=true&resolution=1D"
         res_sn = requests.get(url_sn, headers=HTTP_HEADERS, verify=False, timeout=8)
         if res_sn.status_code == 200:
             data = res_sn.json()
@@ -3541,7 +3552,7 @@ BEST_15_UNIVERSE = [
     {"symbol": "BATBC", "name": "British American Tobacco", "sector": "Food & Allied", "category": "A"},
     {"symbol": "ACI", "name": "ACI Limited", "sector": "Pharma & Chemical", "category": "A"},
     {"symbol": "ACMELAB", "name": "The ACME Laboratories", "sector": "Pharma", "category": "A"},
-    {"symbol": "LHBL", "name": "LafargeHolcim Bangladesh", "sector": "Cement", "category": "A"},
+    {"symbol": "LHB", "name": "LafargeHolcim Bangladesh", "sector": "Cement", "category": "A"},
     {"symbol": "RENATA", "name": "Renata Limited", "sector": "Pharma", "category": "A"},
     {"symbol": "CITYBANK", "name": "The City Bank Limited", "sector": "Bank", "category": "A"},
     {"symbol": "EBL", "name": "Eastern Bank Ltd.", "sector": "Bank", "category": "A"},
@@ -5022,7 +5033,7 @@ with tab_agent:
 
     # 15 Core High-Liquidity Curated Equities for Top 15 Selection
     agent_candidates = [
-        "SQURPHARMA", "GP", "BATBC", "BRACBANK", "WALTONHIL", "RENATA", "LHBL", "IDLC", 
+        "SQURPHARMA", "GP", "BATBC", "BRACBANK", "WALTONHIL", "RENATA", "LHB", "IDLC", 
         "ACMELAB", "BSRMSTEEL", "SONARBAINS", "CITYBANK", "ACI", "ROBI", "BEXIMCO"
     ]
 

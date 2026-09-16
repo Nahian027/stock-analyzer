@@ -313,8 +313,9 @@ HTTP_HEADERS = {
 def fetch_ohlcv_from_stocknow(symbol: str) -> Optional[pd.DataFrame]:
     """Fetches clean daily OHLCV directly from StockNow 1D Candle API."""
     symbol = symbol.strip().upper()
+    sym_query = "LHB" if symbol in ["LHBL", "LAFSURCEML"] else symbol
     try:
-        url = f"https://stocknow.com.bd/api/v1/instruments/{symbol}/history?data2=true&resolution=1D"
+        url = f"https://stocknow.com.bd/api/v1/instruments/{sym_query}/history?data2=true&resolution=1D"
         res = requests.get(url, headers=HTTP_HEADERS, verify=False, timeout=8)
         if res.status_code == 200:
             data = res.json()
@@ -407,7 +408,7 @@ def get_market_ticker_universe() -> List[str]:
         # High liquidity default universe of top DSE stocks
         tickers = [
             "GP", "BATBC", "SQURPHARMA", "BEXIMCO", "BRACBANK", "CITYBANK", "OLYMPIC",
-            "RENATA", "LHBL", "ROBI", "ISLAMIBANK", "UPGDCL", "EBL", "PUBALIBANK",
+            "RENATA", "LHB", "ROBI", "ISLAMIBANK", "UPGDCL", "EBL", "PUBALIBANK",
             "BSC", "SEAPEARL", "MEGHNALIFE", "ARAMIT", "DELTALIFE", "UNIQUEHRL",
             "BEACONPHAR", "WALTONHIL", "MARICO", "HEIDELBCEM", "MJLBD", "TITASGAS",
             "POWERGRID", "BSRMLTD", "BSCCOS", "SUMITPOWER", "IDLC", "JAMUNAOIL",

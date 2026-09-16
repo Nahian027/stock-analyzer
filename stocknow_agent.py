@@ -34,6 +34,8 @@ def fetch_ticker_data_stocknow(ticker: str) -> Optional[pd.DataFrame]:
     Fallback to bdshare if StockNow API is temporarily unreachable.
     """
     sym = ticker.strip().upper()
+    if sym in ["LHBL", "LAFSURCEML"]:
+        sym = "LHB"
     url = f"https://stocknow.com.bd/api/v1/instruments/{sym}/history?data2=true&resolution=1D"
     
     try:
