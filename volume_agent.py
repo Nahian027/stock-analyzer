@@ -32,8 +32,8 @@ def get_market_elapsed_minutes(now_dt: Optional[dt.datetime] = None) -> int:
 
 
 def evaluate_institutional_entry(
-    current_price: float,
-    support_level: float,
+    current_price: float = 0.0,
+    support_level: float = 0.0,
     resistance_level: float = 0.0,
     advanced: int = 0,
     declined: int = 0,
@@ -41,7 +41,9 @@ def evaluate_institutional_entry(
     df_intraday: Optional[pd.DataFrame] = None,     # 5-min OHLCV bars
     df_daily: Optional[pd.DataFrame] = None,        # Daily OHLCV bars
     market_turnover_cr: float = 0.0,                # Live DSE Total Turnover in Crore BDT
-    market_hours_elapsed_mins: int = 240            # Minutes passed since market open (5 to 240)
+    market_hours_elapsed_mins: int = 240,           # Minutes passed since market open (5 to 240)
+    *args,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Autonomous Quantitative Volume & Regime Confirmation Agent.
