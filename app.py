@@ -1614,37 +1614,64 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         rsi_status = "🟢 বুলিশ মোমেন্টাম বজায় রয়েছে (Healthy Bullish Momentum)"
         rsi_color = "#16a34a"
 
-    # 4. IMMEDIATE MARKET ACTION EXECUTION DECISION ENGINE
-    near_s1_or_s2 = (pct_to_s1 <= 0.60) or (pct_to_s2 <= 0.60)
-    near_r1_or_r2 = (pct_to_r1 <= 0.60) or (pct_to_r2 <= 0.60)
+    # 4. DECISIVE INSTITUTIONAL MARKET EXECUTION ACTION MATRIX
+    tot_stocks = advanced + declined
+    breadth_pct = round((advanced / tot_stocks * 100), 1) if tot_stocks > 0 else 50.0
 
-    if (near_s1_or_s2 or pts_to_s1 <= 15.0) and rsi_val <= 36.0:
-        action_type = "BUY"
-        action_badge_en = "ACCUMULATE / BUY ON DIP"
-        action_badge_bn = "ডিপে কিনুন (অ্যাকুমুলেশন জোন)"
-        action_pill_icon = "🟢"
+    # 1. Active Bullish Surge / Breakout Momentum (Strong Advance Breadth >= 60% or DSEX > 20 EMA with positive breadth)
+    if (breadth_pct >= 60.0 and advanced >= 150) or (dsex_now >= ema20 and breadth_pct >= 52.0 and rsi_val >= 42.0):
+        action_type = "BUY_MOMENTUM"
+        action_badge_en = "ACTIVE BUY MOMENTUM (বুলিশ বাই মোমেন্টাম সক্রিয়)"
+        action_badge_bn = "বাই মোমেন্টাম সক্রিয়"
+        action_pill_icon = "🚀"
         action_color = "#15803d"
         action_bg = "#f0fdf4"
         action_border = "#86efac"
-        action_desc = f"সূচক নিকটবর্তী ডিমান্ড সাপোর্ট ({s1_val:,.1f}) এর সন্নিকটে এবং Daily RSI ({rsi_val:.1f}) চরম ওভারসোল্ড। কিস্তিতে 'A' ক্যাটাগরি ফান্ডামেন্টাল শেয়ার ডিপে কেনার সেরা সুযোগ।"
-    elif (near_r1_or_r2 or pts_to_r1 <= 15.0) and rsi_val >= 64.0:
-        action_type = "SELL"
-        action_badge_en = "TAKE PROFIT / REDUCE RISK"
-        action_badge_bn = "মুনাফা তুলুন (ঝুঁকি কমানোর জোন)"
-        action_pill_icon = "🔴"
+        action_desc = f"মার্কেটে শক্তিশালী প্রাতিষ্ঠানিক ক্রেতারা সক্রিয় (মার্কেট ব্রেডথ: {advanced}টি বৃদ্ধি বনাম {declined}টি পতন)। টপ ১৫ কোয়ান্টাম লিডার শেয়ারগুলোতে এন্ট্রি নিন। রেজিস্ট্যান্স টার্গেট {r1_val:,.1f}, ট্রেইলিং স্টপ লস {s1_val:,.1f} পয়েন্টে সেট করুন।"
+
+    # 2. Oversold Demand Floor Accumulation (Near S1/S2 Support or RSI <= 38 with positive signs)
+    elif (pct_to_s1 <= 0.80 or rsi_val <= 38.0 or has_bullish_div) and (declined < advanced * 2.5):
+        action_type = "BUY_DIP"
+        action_badge_en = "VALUE ACCUMULATION ON DIP (সাপোর্ট বাউন্স - ডিপে বাই করুন)"
+        action_badge_bn = "ডিপে অ্যাকুমুলেশন"
+        action_pill_icon = "🎯"
+        action_color = "#047857"
+        action_bg = "#ecfdf5"
+        action_border = "#a7f3d0"
+        action_desc = f"সূচক প্রধান ডিমান্ড সাপোর্ট ({s1_val:,.1f}) এর সন্নিকটে বাউন্স নিশ্চিত করছে (RSI: {rsi_val:.1f})। 'A' ক্যাটাগরি ও আন্ডারভ্যালুড ব্লু-চিপ শেয়ারগুলোতে ৩০%-৫০% কিস্তিতে ক্যাপিটাল ডিপ্লয় করুন।"
+
+    # 3. Supply Resistance Rejection / Profit Taking (Near R1/R2 and RSI >= 65)
+    elif (pct_to_r1 <= 0.50 and rsi_val >= 65.0) or (rsi_val >= 72.0):
+        action_type = "TAKE_PROFIT"
+        action_badge_en = "TAKE PROFIT / LOCK GAINS (রেজিস্ট্যান্সে প্রফিট বুকিং করুন)"
+        action_badge_bn = "আংশিক প্রফিট বুক করুন"
+        action_pill_icon = "🛑"
         action_color = "#b91c1c"
         action_bg = "#fef2f2"
         action_border = "#fca5a5"
-        action_desc = f"সূচক প্রধান রেজিস্ট্যান্স সিলিং ({r1_val:,.1f}) এর কাছাকাছি এবং Daily RSI ({rsi_val:.1f}) ওভারবট জোনে। শর্ট-টার্ম প্রফিট বুকিং ও ক্যাশ রেশিও বৃদ্ধির উপযুক্ত সময়।"
+        action_desc = f"সূচক প্রধান সাপ্লাই রেজিস্ট্যান্স ({r1_val:,.1f}) স্পর্শ করেছে এবং RSI ({rsi_val:.1f}) ওভারবট জোনে। শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট লক করে ক্যাশ রেশিও বৃদ্ধি করুন।"
+
+    # 4. Bearish Breakdown / Capital Protection (Declining breadth dominant and below support)
+    elif (breadth_pct <= 35.0 and declined >= 180) or (dsex_now < s2_val and breadth_pct <= 40.0):
+        action_type = "DEFENSIVE"
+        action_badge_en = "CAPITAL DEFENSE / STRICT STOP LOSS (মূলধন সুরক্ষা ও এক্সিট)"
+        action_badge_bn = "ডিফেন্সিভ মোড / ক্যাশ রাখুন"
+        action_pill_icon = "🛡️"
+        action_color = "#991b1b"
+        action_bg = "#fff1f2"
+        action_border = "#fecdd3"
+        action_desc = f"মার্কেটে বিক্রেতাদের চাপ প্রবল ({declined}টি শেয়ার পতন)। নতুন কেনাকাটা স্থগিত রেখে স্টপ লস ({s1_val:,.1f}) কঠোরভাবে অনুসরণ করুন।"
+
+    # 5. Selective Stock Accumulation in Range (Normal Consolidation)
     else:
-        action_type = "WAIT"
-        action_badge_en = "WAIT & WATCH (নো-ট্রেড জোন - রিভার্সালের অপেক্ষা করুন)"
-        action_badge_bn = "অপেক্ষা করুন (নো-ট্রেড জোন)"
-        action_pill_icon = "⚖️"
-        action_color = "#854d0e"
-        action_bg = "#fefce8"
-        action_border = "#fde047"
-        action_desc = f"সূচক নিকটবর্তী সাপোর্ট ({s1_val:,.1f}) ও রেজিস্ট্যান্স ({r1_val:,.1f}) এর মাঝামাঝি নিরপেক্ষ রেঞ্জে অবস্থান করছে। সুস্পষ্ট ব্রেকআউট বা ডিমান্ড বাউন্স কনফার্মেশন ছাড়া নতুন পজিশন নেওয়া থেকে বিরত থাকুন।"
+        action_type = "SELECTIVE_BUY"
+        action_badge_en = "SELECTIVE STOCK ACCUMULATION (সিলেক্টিভ স্টক অ্যাকুমুলেশন)"
+        action_badge_bn = "বাছাইকৃত স্টকে বাই"
+        action_pill_icon = "⚡"
+        action_color = "#0284c7"
+        action_bg = "#f0f9ff"
+        action_border = "#bae6fd"
+        action_desc = f"সূচক {s1_val:,.1f} – {r1_val:,.1f} রেঞ্জে অবস্থান করায় পাইকারি কেনাকাটা না করে কেবল সর্বোচ্চ স্কোরযুক্ত (Score ≥ 75) ও চার্ট ব্রেকআউট সম্পন্ন সেরা স্টকগুলোতে ফোকাস করুন।"
 
     # 5. MULTI-FACTOR PROBABILITY ENGINE (P Score Formula, 0–100%)
     if dsex_now > ema20 and ema20 > ema50:
