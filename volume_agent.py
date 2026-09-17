@@ -34,6 +34,10 @@ def get_market_elapsed_minutes(now_dt: Optional[dt.datetime] = None) -> int:
 def evaluate_institutional_entry(
     current_price: float,
     support_level: float,
+    resistance_level: float = 0.0,
+    advanced: int = 0,
+    declined: int = 0,
+    dsex_change_pct: float = 0.0,
     df_intraday: Optional[pd.DataFrame] = None,     # 5-min OHLCV bars
     df_daily: Optional[pd.DataFrame] = None,        # Daily OHLCV bars
     market_turnover_cr: float = 0.0,                # Live DSE Total Turnover in Crore BDT
@@ -41,13 +45,13 @@ def evaluate_institutional_entry(
 ) -> Dict[str, Any]:
     """
     Autonomous Quantitative Volume & Regime Confirmation Agent.
-    Replaces passive advisory text with decisive institutional commands:
-    'BUY NOW', 'ACCUMULATE 30%', 'HOLD CASH', 'ABORT TRADE'.
+    Dynamically responds to live market breadth, turnover surge, and price zones:
+    'BUY NOW', 'ACCUMULATE 50%', 'ACCUMULATE 30%', 'TAKE PROFIT', 'ABORT TRADE'.
     """
     if support_level <= 0 or current_price <= 0:
         return {
-            "decision": "AWAIT_CORRECTION",
-            "action_badge": "⚪ অপেক্ষায় থাকুন — রিভার্সাল জোন থেকে দূরে",
+            "decision": "AWAIT_DATA",
+            "action_badge": "⚪ অপেক্ষায় থাকুন — পর্যাপ্ত ডেটা লোড হচ্ছে",
             "command": "HOLD CASH",
             "command_badge": "HOLD CASH (ক্যাশ সংরক্ষণ)",
             "detail_text": "মার্কেট পর্যাপ্ত ডেটা লোড হওয়ার অপেক্ষায় রয়েছে। ক্যাপিটাল সুরক্ষিত রাখুন।",
@@ -60,123 +64,119 @@ def evaluate_institutional_entry(
         }
 
     # -------------------------------------------------------------
-    # A. Volume Run-Rate Projection (Intraday Normalization)
+    # A. Volume Run-Rate & Turnover Projection
     # -------------------------------------------------------------
-    total_session_mins = 240.0  # 10:00 AM to 2:00 PM (4 hours)
+    total_session_mins = 240.0
     elapsed_ratio = max(market_hours_elapsed_mins / total_session_mins, 0.05)
     
+    # 1. Turnover Expansion Ratio (Baseline average DSE daily turnover ~ 700 Crore Tk)
+    baseline_turnover = 700.0
+    turnover_ratio = round(market_turnover_cr / baseline_turnover, 2) if market_turnover_cr > 0 else 1.0
+
+    # 2. Market Breadth Ratio
+    tot_stocks = advanced + declined
+    breadth_pct = round((advanced / tot_stocks * 100), 1) if tot_stocks > 0 else 50.0
+
+    # 3. Daily / Intraday Volume Run-Rate
     if df_daily is not None and len(df_daily) >= 2 and 'Volume' in df_daily.columns:
         daily_vol_sma20 = float(df_daily['Volume'].rolling(20, min_periods=min(3, len(df_daily))).mean().iloc[-1])
         current_day_vol = float(df_daily['Volume'].iloc[-1])
         projected_day_vol = current_day_vol / elapsed_ratio
         projected_vol_ratio = round(projected_day_vol / (daily_vol_sma20 + 1e-9), 2)
     else:
-        projected_vol_ratio = 1.0
+        projected_vol_ratio = max(turnover_ratio, 1.0)
 
     # -------------------------------------------------------------
-    # B. Price Proximity & Rejection Confirmation
+    # B. Price Proximity vs Support & Resistance
     # -------------------------------------------------------------
     price_delta_pct = (current_price - support_level) / (support_level + 1e-9)
-    in_demand_pocket = (-0.005 <= price_delta_pct <= 0.010)  # Within -0.5% to +1.0% of floor
-    
-    bullish_candles = 1
-    intraday_vol_expanding = False
-    
-    if df_intraday is not None and len(df_intraday) >= 3:
-        col_map = {c: c.capitalize() for c in df_intraday.columns}
-        df_intra_norm = df_intraday.rename(columns=col_map)
-        if 'Close' in df_intra_norm.columns and 'Open' in df_intra_norm.columns:
-            last_bars = df_intra_norm.tail(3)
-            bullish_candles = int((last_bars['Close'] >= last_bars['Open']).sum())
-            if 'Volume' in last_bars.columns and len(last_bars) >= 2:
-                intraday_vol_expanding = bool(last_bars['Volume'].iloc[-1] > last_bars['Volume'].mean())
+    in_demand_pocket = (-0.008 <= price_delta_pct <= 0.015)  # Within -0.8% to +1.5% of floor
+    near_resistance = (resistance_level > 0) and (current_price >= resistance_level * 0.992)
+    is_breakdown = current_price < support_level * 0.990
 
     # -------------------------------------------------------------
-    # C. Macro Turnover Condition
+    # C. Dynamic Quantitative Execution Decision Matrix
     # -------------------------------------------------------------
-    # Safe liquidity baseline in BDT Crore (Default healthy threshold: >= 500 Crore or turnover > 0)
-    turnover_healthy = (market_turnover_cr >= 400.0) or (market_turnover_cr <= 0.0)  # If turnover unparsed, don't hard block
-
-    # -------------------------------------------------------------
-    # D. Concrete Agentic Decision Matrix & Unequivocal Commands
-    # -------------------------------------------------------------
-    if current_price < support_level * 0.992:
-        # Breakdown scenario: Price sliced through support
+    if is_breakdown and (declined > advanced or breadth_pct <= 40.0):
+        # 1. Severe Breakdown / Risk Off
         decision = "ABORT_BREAKDOWN"
         command = "ABORT TRADE"
         command_badge = "ABORT TRADE (এন্ট্রি সম্পূর্ণ নিষিদ্ধ)"
         action_badge = "🔴 এন্ট্রি সম্পূর্ণ নিষিদ্ধ — সাপোর্ট ভেঙে পতন (Breakdown)"
         detail_text = (
-            f"সূচক/শেয়ার সাপোর্ট {support_level:,.1f} ভেঙে নিচে অবস্থান করছে। "
-            f"ডাউনট্রেন্ড কার্যকর থাকায় কোনো নতুন ক্যাপিটাল ডিপ্লয় করবেন না।"
+            f"সূচক প্রধান সাপোর্ট {support_level:,.1f} ভেঙে নিচে অবস্থান করছে ({declined}টি শেয়ার পতন)। "
+            f"ডাউনট্রেন্ড কার্যকর থাকায় নতুন ক্যাপিটাল ডিপ্লয় বন্ধ রেখে স্টপ লস নিশ্চিত করুন।"
         )
-        confidence = 0
+        confidence = 10
         color = "#D50000"
         bg_color = "#fef2f2"
         border_color = "#fca5a5"
         command_color = "#991b1b"
-        
+
+    elif (breadth_pct >= 60.0 and (market_turnover_cr >= 800.0 or dsex_change_pct >= 0.50)) or (breadth_pct >= 75.0):
+        # 2. Strong Bullish Surge / High-Turnover Breakout
+        decision = "CONFIRMED_EXECUTION"
+        command = "BUY NOW"
+        command_badge = "BUY NOW (তাৎক্ষণিক বাই একশন)"
+        action_badge = "🟢 স্ট্রং বাই কনফার্মড — শক্তিশালী প্রাতিষ্ঠানিক ব্রেকআউট"
+        detail_text = (
+            f"মার্কেটে শক্তিশালী প্রাতিষ্ঠানিক বাই মোমেন্টাম সক্রিয় (টার্নওভার: {market_turnover_cr:,.1f} কোটি টাকা, "
+            f"ব্রেডথ: {advanced}টি আপ বনাম {declined}টি ডাউন)। সেরা ১৫টি লিডার শেয়ারে ১০০% ট্রেডিং পজিশন কার্যকর করার অনুকূল সময়।"
+        )
+        confidence = 95
+        color = "#00C853"
+        bg_color = "#f0fdf4"
+        border_color = "#86efac"
+        command_color = "#15803d"
+
+    elif near_resistance:
+        # 3. Reaching Upper Supply Resistance Cluster
+        decision = "TAKE_PROFIT"
+        command = "TAKE PROFIT"
+        command_badge = "TAKE PROFIT (৫০% প্রফিট লক)"
+        action_badge = "🛑 রেজিস্ট্যান্স প্রফিট টেকিং — ক্যাশ রেশিও বৃদ্ধি করুন"
+        detail_text = (
+            f"সূচক প্রধান রেজিস্ট্যান্স সিলিং {resistance_level:,.1f}-এর সন্নিকটে অবস্থান করছে। "
+            f"শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট বুক করে ক্যাপিটাল নিরাপদ রাখুন।"
+        )
+        confidence = 85
+        color = "#D50000"
+        bg_color = "#fef2f2"
+        border_color = "#fca5a5"
+        command_color = "#991b1b"
+
     elif in_demand_pocket:
-        if projected_vol_ratio >= 1.30 and bullish_candles >= 2 and turnover_healthy:
-            decision = "CONFIRMED_EXECUTION"
-            command = "BUY NOW"
-            command_badge = "BUY NOW (তাত্ক্ষণিক বাই একশন)"
-            action_badge = "🟢 স্ট্রং বাই কনফার্মড — প্রাতিষ্ঠানিক অ্যাকুমুলেশন নিশ্চিত"
-            detail_text = (
-                f"সাপোর্ট জোন ({support_level:,.1f})-এ প্রজেক্টেড ভলিউম স্বাভাবিকের চেয়ে {projected_vol_ratio:.2f}x বেশি "
-                f"এবং টার্নওভার ({market_turnover_cr:,.1f} কোটি) অনুকূল। এখনই রিবাউন্ড এন্ট্রি নেওয়ার চূড়ান্ত সময়।"
-            )
-            confidence = 95
-            color = "#00C853"
-            bg_color = "#f0fdf4"
-            border_color = "#86efac"
-            command_color = "#15803d"
-            
-        elif projected_vol_ratio >= 1.0 and bullish_candles >= 1:
-            decision = "MODERATE_ACCUMULATION"
-            command = "ACCUMULATE 30%"
-            command_badge = "ACCUMULATE 30% (আংশিক পজিশন)"
-            action_badge = "🔵 আংশিক এন্ট্রি অনুমোদিত — ট্রায়াল পজিশন (Max 30%)"
-            detail_text = (
-                f"সাপোর্ট টেস্ট হচ্ছে কিন্তু ভলিউম রান-রেট গড় মাত্রায় ({projected_vol_ratio:.2f}x)। "
-                f"বড় ব্রেকআউট কনফার্মেশন না পাওয়া পর্যন্ত পোর্টফোলিওর ৩০% ক্যাপিটালে সীমাবদ্ধ থাকুন।"
-            )
-            confidence = 65
-            color = "#1E88E5"
-            bg_color = "#eff6ff"
-            border_color = "#93c5fd"
-            command_color = "#1d4ed8"
-            
-        else:
-            decision = "NO_VOLUME_TRAP"
-            command = "HOLD CASH"
-            command_badge = "HOLD CASH (ফলস বাউন্স ফাঁদ)"
-            action_badge = "🟡 ফলস বাউন্স সতর্কতা — ভলিউমহীন দুর্বল রিবাউন্ড"
-            detail_text = (
-                f"সাপোর্টে পৌঁছালেও সক্রিয় প্রাতিষ্ঠানিক ক্রেতা নেই (ভলিউম মাত্র {projected_vol_ratio:.2f}x)। "
-                f"এটি ডেড-ক্যাট বাউন্স হওয়ার ঝুঁকি প্রবল; ভলিউম ব্রেকআউট না হওয়া পর্যন্ত ক্যাশ ধরে রাখুন।"
-            )
-            confidence = 25
-            color = "#FFB300"
-            bg_color = "#fffbeb"
-            border_color = "#fde68a"
-            command_color = "#b45309"
-            
+        # 4. Support Bounce Value Dip
+        decision = "ACCUMULATE_SUPPORT"
+        command = "ACCUMULATE 50%"
+        command_badge = "ACCUMULATE 50% (সাপোর্ট ডিপ)"
+        action_badge = "🔵 ভ্যালু ডিপ অ্যাকুমুলেশন — কিস্তিতে ক্রয় অনুমোদিত"
+        detail_text = (
+            f"সূচক সাপোর্ট জোন {support_level:,.1f}-এ সফলভাবে বাউন্স টেস্ট করছে (ভলিউম রান-রেট: {projected_vol_ratio:.2f}x)। "
+            f"ফান্ডামেন্টাল ভ্যালু শেয়ারগুলোতে ৫০% ক্যাপিটালে কিস্তিতে পজিশন নিন।"
+        )
+        confidence = 80
+        color = "#1E88E5"
+        bg_color = "#eff6ff"
+        border_color = "#93c5fd"
+        command_color = "#1d4ed8"
+
     else:
-        # Out of demand zone (Above support)
-        pts_above = current_price - support_level
-        pct_above = (pts_above / (support_level + 1e-9)) * 100
-        decision = "AWAIT_CORRECTION"
-        command = "HOLD CASH"
-        command_badge = "HOLD CASH (ডিপের জন্য অপেক্ষা)"
-        action_badge = "⚪ অপেক্ষায় থাকুন — রিভার্সাল জোন থেকে দূরে"
-        detail_text = f"বর্তমান লেভেল সাপোর্ট ({support_level:,.1f}) থেকে +{pts_above:,.1f} pts (+{pct_above:.1f}%) উপরে। কোনো ফোমো (FOMO) এন্ট্রি নয়; সুনির্দিষ্ট ডিপের জন্য অপেক্ষা করুন।"
-        confidence = 50
-        color = "#FFB300"
-        bg_color = "#f8fafc"
-        border_color = "#cbd5e1"
-        command_color = "#475569"
-        
+        # 5. Rangebound Selective Stock Rotation
+        decision = "SELECTIVE_ACCUMULATION"
+        command = "ACCUMULATE 30%"
+        command_badge = "ACCUMULATE 30% (সিলেক্টিভ এন্ট্রি)"
+        action_badge = "🟡 সিলেক্টিভ এন্ট্রি — কনসোলিডেশন রেঞ্জ"
+        detail_text = (
+            f"মার্কেট {support_level:,.1f} থেকে {resistance_level:,.1f} রেঞ্জে ট্রেড করছে (ব্রেডথ: {advanced} আপ / {declined} ডাউন)। "
+            f"কেবলমাত্র নিশ্চিত ব্রেকআউট সম্পন্ন সেরা স্টকগুলোতে ৩০% ক্যাপিটালে সীমাবদ্ধ থাকুন।"
+        )
+        confidence = 65
+        color = "#0284c7"
+        bg_color = "#f0f9ff"
+        border_color = "#bae6fd"
+        command_color = "#0369a1"
+
     return {
         "decision": decision,
         "action_badge": action_badge,

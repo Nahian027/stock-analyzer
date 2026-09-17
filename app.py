@@ -5214,6 +5214,10 @@ Mathematical Ordering: S3 &lt; S2 &lt; S1 &lt; C &lt; R1 &lt; R2 &lt; R3
     vol_entry_agent = evaluate_institutional_entry(
         current_price=float(reversal_data['dsex_now']),
         support_level=float(reversal_data['s1_val']),
+        resistance_level=float(reversal_data['r1_val']),
+        advanced=int(stats_data.get("advanced", 0)),
+        declined=int(stats_data.get("declined", 0)),
+        dsex_change_pct=float(idx_dsex.get("pct_change", 0.0)),
         df_intraday=None,
         df_daily=None,
         market_turnover_cr=dse_turnover_cr,
