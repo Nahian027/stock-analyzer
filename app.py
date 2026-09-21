@@ -12,6 +12,8 @@ import urllib3
 import io
 import re
 import bdshare
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from core_engine import evaluate_ticker, calculate_rsi, get_accurate_next_move
 from volume_agent import evaluate_institutional_entry, get_market_elapsed_minutes
@@ -606,42 +608,71 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
     target1_pct = round(((target1_val - ltp_val) / (ltp_val + 1e-9)) * 100, 1)
     target2_pct = round(((target2_val - ltp_val) / (ltp_val + 1e-9)) * 100, 1)
 
+    # Explicit Verification of Institutional Buy Criteria:
+    # 1. Resistance Breakout (মার্কেট বা স্টক রেজিস্ট্যান্স ব্রেকআউট নিশ্চিত করেছে)
+    is_resistance_breakout = (
+        "Breakout" in pattern_val
+        or "Cup" in pattern_val
+        or "Flag" in pattern_val
+        or ltp_val >= tech_indicators.get("sma_20", ltp_val) * 1.015
+        or ltp_val >= target1_val * 0.985
+    )
+
+    # 2. Support Zone Rebound (স্টক তার নিজস্ব সাপোর্ট জোন থেকে রিবাউন্ড করছে)
+    is_support_rebound = (
+        (abs(ltp_val - floor_val) / (ltp_val + 1e-9) <= 0.035)
+        or rsi_1d_val <= 38.0
+        or "Hammer" in pattern_val
+        or "Engulfing" in pattern_val
+        or "Reversal" in pattern_val
+        or "Morning Star" in pattern_val
+        or (rsi_5m_val >= 35.0 and ltp_val <= floor_val + 1.2 * atr_val)
+    )
+
     # Signal and Order Classification
-    if score_val >= 75:
-        if "Breakout" in pattern_val or ltp_val > tech_indicators.get("sma_20", ltp_val) * 1.02:
-            signal_val = "BUY — BREAKOUT"
-        else:
-            signal_val = "BUY"
+    if is_resistance_breakout and score_val >= 55:
+        signal_val = "BUY — BREAKOUT"
         order_badge_color = "#00C853"
         order_badge_bg = "#f0fdf4"
         order_border = "#86efac"
-        order_command = "🟢 EXECUTE BUY ORDER (ক্রয় নিশ্চিত করুন)"
-        action_detail = f"শেয়ারটি বর্তমানে শক্তিশালী টেকনিক্যাল মোমেন্টামে রয়েছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। প্রাতিষ্ঠানিক সাপোর্ট {floor_val:.2f}-এ স্টপ লস রেখে টার্গেট {target1_val:.2f} এর জন্য পজিশন নিন।"
-    elif score_val >= 55:
-        if rsi_1d_val < 35 or "Hammer" in pattern_val or "Engulfing" in pattern_val:
-            signal_val = "BUY — REVERSAL"
-        elif abs(ltp_val - tech_indicators.get("sma_20", ltp_val)) / (ltp_val + 1e-9) <= 0.02:
-            signal_val = "BUY — PULLBACK"
-        else:
-            signal_val = "BUY"
+        order_command = "🟢 EXECUTE BUY ORDER (ব্রেকআউট কনফার্মড)"
+        trigger_tag = "🚀 রেজিস্ট্যান্স ব্রেকআউট (Resistance Breakout)"
+        trigger_tag_bg = "#dcfce7"
+        trigger_tag_fg = "#15803d"
+        trigger_tag_border = "#86efac"
+        action_detail = f"শেয়ারটি রেজিস্ট্যান্স ব্রেকআউট নিশ্চিত করেছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। প্রাতিষ্ঠানিক সাপোর্ট {floor_val:.2f}-এ স্টপ লস রেখে টার্গেট {target1_val:.2f} এর জন্য বাই পজিশন কার্যকর করুন।"
+    elif is_support_rebound and score_val >= 50:
+        signal_val = "BUY — SUPPORT REBOUND"
         order_badge_color = "#16a34a"
         order_badge_bg = "#f0fdf4"
         order_border = "#86efac"
-        order_command = "🟢 EXECUTE BUY ORDER (ক্রয় নিশ্চিত করুন)"
-        action_detail = f"শেয়ারটি ভ্যালু ডিমান্ড জোন থেকে রিবাউন্ড করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {floor_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {target1_val:.2f} এর জন্য পজিশন নেওয়া যায়।"
+        order_command = "🟢 EXECUTE BUY ORDER (সাপোর্ট বাউন্স)"
+        trigger_tag = "🎯 সাপোর্ট রিবাউন্ড (Support Rebound)"
+        trigger_tag_bg = "#eff6ff"
+        trigger_tag_fg = "#1d4ed8"
+        trigger_tag_border = "#bfdbfe"
+        action_detail = f"শেয়ারটি নিজস্ব প্রধান সাপোর্ট জোন ({floor_val:.2f}) থেকে রিবাউন্ড নিশ্চিত করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {floor_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {target1_val:.2f} এর জন্য পজিশন নিন।"
     elif score_val >= 40:
-        signal_val = "WATCH"
-        order_badge_color = "#eab308"
+        signal_val = "HOLD / AWAIT SETUP"
+        order_badge_color = "#d97706"
         order_badge_bg = "#fefce8"
         order_border = "#fef08a"
-        order_command = "🟡 HOLD / AWAIT BREAKOUT (হোল্ড করুন / অপেক্ষা)"
-        action_detail = f"শেয়ারটি বর্তমানে {floor_val:.2f} থেকে {target1_val:.2f} রেঞ্জে কনসলিডেশন করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। তাড়াহুড়ো করে এন্ট্রি না দিয়ে রেঞ্জ ব্রেকআউটের অপেক্ষা করুন।"
+        order_command = "🟡 HOLD / AWAIT SETUP (অপেক্ষা করুন)"
+        trigger_tag = "⚖️ রেঞ্জ কনসলিডেশন (Consolidation)"
+        trigger_tag_bg = "#fefce8"
+        trigger_tag_fg = "#a16207"
+        trigger_tag_border = "#fef08a"
+        action_detail = f"শেয়ারটি বর্তমানে {floor_val:.2f} (সাপোর্ট) থেকে {target1_val:.2f} (রেজিস্ট্যান্স) রেঞ্জে কনসলিডেশন করছে। সাপোর্ট রিবাউন্ড বা রেজিস্ট্যান্স ব্রেকআউট ছাড়া নতুন বাই এন্ট্রি স্থগিত রাখুন।"
     else:
         signal_val = "SELL / EXIT"
-        order_badge_color = "#D50000"
+        order_badge_color = "#dc2626"
         order_badge_bg = "#fef2f2"
-        order_border = "#fecaca"
+        order_border = "#fca5a5"
         order_command = "🔴 EXECUTE SELL / EXIT (বিক্রয় / প্রস্থান করুন)"
+        trigger_tag = "🛑 দুর্বল ট্রেন্ড / এক্সিট (Downside Risk)"
+        trigger_tag_bg = "#fee2e2"
+        trigger_tag_fg = "#b91c1c"
+        trigger_tag_border = "#fca5a5"
         action_detail = f"শেয়ারটি দুর্বল কারিগরি ট্রেন্ডে অবস্থান করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। মূলধন সুরক্ষার জন্য বাউন্সে {target1_val:.2f}-এ এক্সিট করুন বা {floor_val:.2f} ব্রেকডাউনে স্টপ লস নিন।"
 
     if "BUY" in signal_val:
@@ -706,6 +737,10 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
         "setup_badge": setup_badge,
         "score": score_val,
         "signal": signal_val,
+        "trigger_tag": trigger_tag,
+        "trigger_tag_bg": trigger_tag_bg,
+        "trigger_tag_fg": trigger_tag_fg,
+        "trigger_tag_border": trigger_tag_border,
         "floor": floor_val,
         "target": target1_val,
         "target1": target1_val,
@@ -837,6 +872,11 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
         f'</div>'
     )
 
+    trigger_tag_str = c.get("trigger_tag", "")
+    trigger_badge_html = ""
+    if trigger_tag_str:
+        trigger_badge_html = f'<span style="display: inline-block; font-size: 9.5px; font-weight: 800; background: {c.get("trigger_tag_bg", "#eff6ff")}; color: {c.get("trigger_tag_fg", "#1d4ed8")}; border: 1px solid {c.get("trigger_tag_border", "#bfdbfe")}; padding: 1.5px 6px; border-radius: 4px; margin-left: 5px;">{trigger_tag_str}</span>'
+
     card_html = (
         f'<div class="stock-card-container">'
         f'<div class="card-header-top">'
@@ -844,7 +884,7 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
         f'<div class="stock-avatar-circle">{sym[:2]}</div>'
         f'<div style="overflow: hidden;">'
         f'<div class="card-title-text" title="{company_name}">{company_name}</div>'
-        f'<div class="card-sub-text"><b>{sym}</b> · [{category}] · {sector}</div>'
+        f'<div class="card-sub-text"><b>{sym}</b> · [{category}] · {sector}{trigger_badge_html}</div>'
         f'</div>'
         f'</div>'
         f'{header_right_badges}'
@@ -1618,8 +1658,30 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
     tot_stocks = advanced + declined
     breadth_pct = round((advanced / tot_stocks * 100), 1) if tot_stocks > 0 else 50.0
 
-    # 1. Active Bullish Surge / Breakout Momentum (Strong Advance Breadth >= 60% or DSEX > 20 EMA with positive breadth)
-    if (breadth_pct >= 60.0 and advanced >= 150) or (dsex_now >= ema20 and breadth_pct >= 52.0 and rsi_val >= 42.0):
+    # 1. Bearish Breakdown / Severe Capital Defense
+    if (breadth_pct <= 35.0 and declined >= 180) or (dsex_now < s2_val and breadth_pct <= 40.0) or (dsex_now < s1_val * 0.990 and declined > advanced):
+        action_type = "DEFENSIVE"
+        action_badge_en = "CAPITAL DEFENSE / STRICT STOP LOSS (মূলধন সুরক্ষা ও এক্সিট)"
+        action_badge_bn = "ডিফেন্সিভ মোড / ক্যাশ রাখুন"
+        action_pill_icon = "🛡️"
+        action_color = "#991b1b"
+        action_bg = "#fff1f2"
+        action_border = "#fecdd3"
+        action_desc = f"মার্কেটে বিক্রেতাদের চাপ প্রবল ({declined}টি শেয়ার পতন)। নতুন কেনাকাটা সম্পূর্ণ স্থগিত রেখে স্টপ লস ({s1_val:,.1f}) কঠোরভাবে অনুসরণ করুন।"
+
+    # 2. Testing Supply Resistance / Profit Taking Caution (Near R1/R2 or Overbought RSI >= 68, unless breadth is super breakout > 75%)
+    elif (pct_to_r1 <= 0.80 and breadth_pct < 75.0) or (rsi_val >= 68.0):
+        action_type = "TAKE_PROFIT"
+        action_badge_en = "RESISTANCE CAUTION / TAKE PROFIT (রেজিস্ট্যান্সে প্রফিট বুকিং করুন)"
+        action_badge_bn = "আংশিক প্রফিট লক"
+        action_pill_icon = "🛑"
+        action_color = "#dc2626"
+        action_bg = "#fef2f2"
+        action_border = "#fca5a5"
+        action_desc = f"সূচক প্রধান সাপ্লাই রেজিস্ট্যান্স ({r1_val:,.1f}) এর সন্নিকটে (দূরত্ব মাত্র {pts_to_r1:,.1f} পয়েন্ট)। এই লেভেলে নতুন আগ্রাসী বাই এড়িয়ে শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট লক করুন এবং ব্রেকআউটের অপেক্ষা করুন।"
+
+    # 3. Active Bullish Surge / Breakout Momentum (Strong Advance Breadth >= 60% or DSEX > 20 EMA with positive breadth, with upside room)
+    elif (breadth_pct >= 60.0 and advanced >= 150) or (dsex_now >= ema20 and breadth_pct >= 52.0 and rsi_val >= 42.0):
         action_type = "BUY_MOMENTUM"
         action_badge_en = "ACTIVE BUY MOMENTUM (বুলিশ বাই মোমেন্টাম সক্রিয়)"
         action_badge_bn = "বাই মোমেন্টাম সক্রিয়"
@@ -1629,7 +1691,7 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         action_border = "#86efac"
         action_desc = f"মার্কেটে শক্তিশালী প্রাতিষ্ঠানিক ক্রেতারা সক্রিয় (মার্কেট ব্রেডথ: {advanced}টি বৃদ্ধি বনাম {declined}টি পতন)। টপ ১৫ কোয়ান্টাম লিডার শেয়ারগুলোতে এন্ট্রি নিন। রেজিস্ট্যান্স টার্গেট {r1_val:,.1f}, ট্রেইলিং স্টপ লস {s1_val:,.1f} পয়েন্টে সেট করুন।"
 
-    # 2. Oversold Demand Floor Accumulation (Near S1/S2 Support or RSI <= 38 with positive signs)
+    # 4. Oversold Demand Floor Accumulation (Near S1/S2 Support or RSI <= 38 with positive signs)
     elif (pct_to_s1 <= 0.80 or rsi_val <= 38.0 or has_bullish_div) and (declined < advanced * 2.5):
         action_type = "BUY_DIP"
         action_badge_en = "VALUE ACCUMULATION ON DIP (সাপোর্ট বাউন্স - ডিপে বাই করুন)"
@@ -1639,28 +1701,6 @@ def get_dsex_reversal_analysis(live_dsex_val: float = 0.0, advanced: int = 0, de
         action_bg = "#ecfdf5"
         action_border = "#a7f3d0"
         action_desc = f"সূচক প্রধান ডিমান্ড সাপোর্ট ({s1_val:,.1f}) এর সন্নিকটে বাউন্স নিশ্চিত করছে (RSI: {rsi_val:.1f})। 'A' ক্যাটাগরি ও আন্ডারভ্যালুড ব্লু-চিপ শেয়ারগুলোতে ৩০%-৫০% কিস্তিতে ক্যাপিটাল ডিপ্লয় করুন।"
-
-    # 3. Supply Resistance Rejection / Profit Taking (Near R1/R2 and RSI >= 65)
-    elif (pct_to_r1 <= 0.50 and rsi_val >= 65.0) or (rsi_val >= 72.0):
-        action_type = "TAKE_PROFIT"
-        action_badge_en = "TAKE PROFIT / LOCK GAINS (রেজিস্ট্যান্সে প্রফিট বুকিং করুন)"
-        action_badge_bn = "আংশিক প্রফিট বুক করুন"
-        action_pill_icon = "🛑"
-        action_color = "#b91c1c"
-        action_bg = "#fef2f2"
-        action_border = "#fca5a5"
-        action_desc = f"সূচক প্রধান সাপ্লাই রেজিস্ট্যান্স ({r1_val:,.1f}) স্পর্শ করেছে এবং RSI ({rsi_val:.1f}) ওভারবট জোনে। শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট লক করে ক্যাশ রেশিও বৃদ্ধি করুন।"
-
-    # 4. Bearish Breakdown / Capital Protection (Declining breadth dominant and below support)
-    elif (breadth_pct <= 35.0 and declined >= 180) or (dsex_now < s2_val and breadth_pct <= 40.0):
-        action_type = "DEFENSIVE"
-        action_badge_en = "CAPITAL DEFENSE / STRICT STOP LOSS (মূলধন সুরক্ষা ও এক্সিট)"
-        action_badge_bn = "ডিফেন্সিভ মোড / ক্যাশ রাখুন"
-        action_pill_icon = "🛡️"
-        action_color = "#991b1b"
-        action_bg = "#fff1f2"
-        action_border = "#fecdd3"
-        action_desc = f"মার্কেটে বিক্রেতাদের চাপ প্রবল ({declined}টি শেয়ার পতন)। নতুন কেনাকাটা স্থগিত রেখে স্টপ লস ({s1_val:,.1f}) কঠোরভাবে অনুসরণ করুন।"
 
     # 5. Selective Stock Accumulation in Range (Normal Consolidation)
     else:
@@ -5244,36 +5284,42 @@ Mathematical Ordering: S3 &lt; S2 &lt; S1 &lt; C &lt; R1 &lt; R2 &lt; R3
 <span>📋</span> প্রাতিষ্ঠানিক এক্সিকিউশন ও ট্রেডিং স্ট্র্যাটেজি ব্লুপ্রিন্ট (Execution Action Matrix)
 </div>
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;">
-<div style="background: {vol_entry_agent['bg_color']}; border: 1.5px solid {vol_entry_agent['border_color']}; border-left: 5px solid {vol_entry_agent['color']}; border-radius: 8px; padding: 10px 14px;">
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+<div style="background: {vol_entry_agent['bg_color']}; border: 1.5px solid {vol_entry_agent['border_color']}; border-left: 5px solid {vol_entry_agent['color']}; border-radius: 8px; padding: 12px 14px;">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
 <div style="font-size: 11.5px; font-weight: 800; color: {vol_entry_agent['command_color']};">
-🛒 Buying Strategy (ক্রয় একশন):
+🟢 BUY DIRECTIVE (ক্রয় নির্দেশনা):
 </div>
 <span style="font-size: 10px; font-weight: 900; background: {vol_entry_agent['color']}; color: #ffffff; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px;">
 {vol_entry_agent['command']} ({vol_entry_agent['confidence_score']}%)
 </span>
 </div>
-<div style="font-size: 12px; color: #0f172a; font-weight: 800; line-height: 1.4; margin-bottom: 3px;">
-{vol_entry_agent['action_badge']}
+<div style="font-size: 12px; color: #0f172a; font-weight: 800; line-height: 1.4; margin-bottom: 4px;">
+{vol_entry_agent.get('buy_instruction', vol_entry_agent['action_badge'])}
 </div>
 <div style="font-size: 11.5px; color: #334155; font-weight: 600; line-height: 1.4;">
 {vol_entry_agent['detail_text']}
 </div>
 </div>
-<div style="background: #ffffff; border: 1px solid #fecdd3; border-left: 4px solid #ef4444; border-radius: 8px; padding: 10px 14px;">
-<div style="font-size: 11.5px; font-weight: 800; color: #991b1b; margin-bottom: 3px;">
-🎯 Exit Strategy (বিক্রয় কৌশল):
+<div style="background: #ffffff; border: 1px solid #fecdd3; border-left: 5px solid #dc2626; border-radius: 8px; padding: 12px 14px;">
+<div style="font-size: 11.5px; font-weight: 800; color: #991b1b; margin-bottom: 5px;">
+🔴 SELL / EXIT STRATEGY (বিক্রয় ও প্রফিট টেকিং):
 </div>
-<div style="font-size: 12px; color: #334155; font-weight: 600; line-height: 1.5;">
-সূচক <b style="color: #b91c1c;">{reversal_data['r1_val']:,.1f}</b> স্পর্শ করলে শর্ট-টার্ম প্রফিট বুকিং করুন।
+<div style="font-size: 12px; color: #0f172a; font-weight: 800; line-height: 1.4; margin-bottom: 4px;">
+🎯 রেজিস্ট্যান্স টার্গেট: <b style="color: #b91c1c;">{reversal_data['r1_val']:,.1f}</b> (R1) • <b style="color: #9f1239;">{reversal_data['r2_val']:,.1f}</b> (R2)
+</div>
+<div style="font-size: 11.5px; color: #334155; font-weight: 600; line-height: 1.4;">
+সূচক রেজিস্ট্যান্স <b style="color: #b91c1c;">{reversal_data['r1_val']:,.1f}</b> স্পর্শ করলে শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট লক করুন।
 </div>
 </div>
-<div style="background: #ffffff; border: 1px solid #fed7aa; border-left: 4px solid #f97316; border-radius: 8px; padding: 10px 14px;">
-<div style="font-size: 11.5px; font-weight: 800; color: #c2410c; margin-bottom: 3px;">
-🛡️ Invalidation Level (স্টপ-লস / ঝুঁকি সুরক্ষা):
+<div style="background: #ffffff; border: 1px solid #fed7aa; border-left: 5px solid #ea580c; border-radius: 8px; padding: 12px 14px;">
+<div style="font-size: 11.5px; font-weight: 800; color: #c2410c; margin-bottom: 5px;">
+🛡️ STOP-LOSS / INVALIDATION (ঝুঁকি সুরক্ষা ও স্টপ-লস):
 </div>
-<div style="font-size: 12px; color: #334155; font-weight: 600; line-height: 1.5;">
-সূচক <b style="color: #c2410c;">{reversal_data['s2_val']:,.1f}</b> এর নিচে দৈনিক ক্লোজ দিলে স্টপ-লস কার্যকর করুন।
+<div style="font-size: 12px; color: #0f172a; font-weight: 800; line-height: 1.4; margin-bottom: 4px;">
+🛑 চূড়ান্ত স্টপ-লস লেভেল: <b style="color: #c2410c;">{reversal_data['s2_val']:,.1f}</b> (S2)
+</div>
+<div style="font-size: 11.5px; color: #334155; font-weight: 600; line-height: 1.4;">
+সূচক সাপোর্ট <b style="color: #15803d;">{reversal_data['s1_val']:,.1f}</b> ভেঙে <b style="color: #c2410c;">{reversal_data['s2_val']:,.1f}</b> এর নিচে দৈনিক ক্লোজ দিলে স্টপ-লস কার্যকর করুন।
 </div>
 </div>
 </div>
@@ -5543,16 +5589,28 @@ with tab_agent:
         fl_val = float(setup.get('floor', round(ltp_val * 0.98, 2)))
         fl_pct = float(setup.get('floor_pct', -2.0))
         action_msg = setup.get('action_detail') or f"শেয়ারটি ভ্যালু ডিমান্ড জোন থেকে রিবাউন্ড করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {fl_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {t1_val:.2f} এর জন্য পজিশন নেওয়া যায়।"
-        bg_col = "#f0fdf4"
-        bdr_col = "#86efac"
-        bdg_col = "#00C853"
+        
+        # Dynamic theme colors for SELL (Red box), HOLD (Yellow box), and BUY (Green box)
+        if "SELL" in order_cmd or "EXIT" in order_cmd or score_val < 40:
+            bg_col = setup.get('badge_bg') or "#fef2f2"
+            bdr_col = setup.get('border_color') or "#fca5a5"
+            bdg_col = setup.get('badge_color') or "#dc2626"
+        elif "HOLD" in order_cmd or "AWAIT" in order_cmd or "WATCH" in str(setup.get('signal', '')) or score_val < 55:
+            bg_col = setup.get('badge_bg') or "#fefce8"
+            bdr_col = setup.get('border_color') or "#fef08a"
+            bdg_col = setup.get('badge_color') or "#d97706"
+        else:
+            bg_col = setup.get('badge_bg') or "#f0fdf4"
+            bdr_col = setup.get('border_color') or "#86efac"
+            bdg_col = setup.get('badge_color') or "#16a34a"
 
         card_html = f"""
         <div style="background: {bg_col}; border: 1.5px solid {bdr_col}; border-left: 8px solid {bdg_col}; border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.03);">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; border-bottom: 1px dashed {bdr_col}; padding-bottom: 10px;">
-                <div>
+                <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
                     <span style="font-size: 20px; font-weight: 900; color: #0f172a;">{sym_name}</span>
-                    <span style="font-size: 13.5px; font-weight: 700; color: #475569; margin-left: 8px;">LTP: Tk {ltp_val:.2f} ({pct_val:+.2f}%)</span>
+                    <span style="display: inline-block; font-size: 11.5px; font-weight: 800; background: {setup.get('trigger_tag_bg', '#eff6ff')}; color: {setup.get('trigger_tag_fg', '#1d4ed8')}; border: 1px solid {setup.get('trigger_tag_border', '#bfdbfe')}; padding: 3px 10px; border-radius: 6px;">{setup.get('trigger_tag', '')}</span>
+                    <span style="font-size: 13.5px; font-weight: 700; color: #475569;">LTP: Tk {ltp_val:.2f} ({pct_val:+.2f}%)</span>
                 </div>
                 <div style="background: {bdg_col}; color: white; padding: 5px 16px; border-radius: 20px; font-size: 13px; font-weight: 900; letter-spacing: 0.3px;">
                     {order_cmd}
@@ -5638,183 +5696,178 @@ with tab_screener:
         with sl_c3:
             rsi_min_max = st.slider("⚡ 14-Day RSI Threshold Range", min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=1.0, help="Constrain RSI bounds")
 
-    # 3. Comprehensive Multi-Condition Screener Evaluation
+    # 3. Comprehensive Multi-Condition Screener Evaluation (Parallel Engine)
     all_symbols = sorted(list(unified_quotes.keys()))
-    screener_results = []
     
-    wl_dict = {item["symbol"]: item for item in WATCHLIST_STOCKS}
+    if search_sym.strip():
+        q_sc = search_sym.strip().upper()
+        candidate_symbols = [s for s in all_symbols if q_sc in s or q_sc in get_stock_meta(s).get("name", "").upper()]
+    else:
+        liquid_syms = [
+            s for s, q in unified_quotes.items()
+            if float(q.get("ltp", 0.0)) > 0
+            and float(q.get("volume", 0.0)) >= min_vol_slider
+            and (price_min_max[0] <= float(q.get("ltp", 0.0)) <= price_min_max[1])
+        ]
+        wl_symbols = [s["symbol"] for s in WATCHLIST_STOCKS if s["symbol"] in unified_quotes]
+        top_liquid = sorted(liquid_syms, key=lambda s: float(unified_quotes[s].get("volume", 0)), reverse=True)[:80]
+        candidate_symbols = list(dict.fromkeys(wl_symbols + top_liquid))
 
-    for sym in all_symbols:
-        q = unified_quotes.get(sym, {})
-        ltp = float(q.get("ltp", 0.0))
-        if ltp <= 0:
-            continue
+    def evaluate_screener_single(sym):
+        try:
+            q = unified_quotes.get(sym, {})
+            ltp = float(q.get("ltp", 0.0))
+            if ltp <= 0:
+                return None
 
-        chg = float(q.get("change", 0.0))
-        pct = float(q.get("pct_change", 0.0))
-        vol = float(q.get("volume", 0.0))
-        ycp = float(q.get("ycp", ltp))
-        high = float(q.get("high", ltp))
-        low = float(q.get("low", ltp))
-        open_p = float(q.get("open", 0.0)) if q.get("open") else None
+            chg = float(q.get("change", 0.0))
+            pct = float(q.get("pct_change", 0.0))
+            vol = float(q.get("volume", 0.0))
+            ycp = float(q.get("ycp", ltp))
+            high = float(q.get("high", ltp))
+            low = float(q.get("low", ltp))
+            open_p = float(q.get("open", 0.0)) if q.get("open") else None
 
-        # Manual filter checks early exit
-        if vol < min_vol_slider:
-            continue
-        if not (price_min_max[0] <= ltp <= price_min_max[1]):
-            continue
+            if vol < min_vol_slider:
+                return None
+            if not (price_min_max[0] <= ltp <= price_min_max[1]):
+                return None
 
-        # Ingest indicators and patterns
-        analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct, open_p=open_p)
-        df_ind = analysis.get("df_indicators", pd.DataFrame())
+            analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct, open_p=open_p)
+            df_ind = analysis.get("df_indicators", pd.DataFrame())
 
-        if df_ind.empty or len(df_ind) < 15:
-            continue
+            if df_ind.empty or len(df_ind) < 10:
+                return None
 
-        close_s = df_ind["close"]
-        high_s = df_ind["high"]
-        low_s = df_ind["low"]
-        vol_s = df_ind["volume"]
+            close_s = df_ind["close"] if "close" in df_ind.columns else df_ind["Close"]
+            high_s = df_ind["high"] if "high" in df_ind.columns else df_ind["High"]
+            low_s = df_ind["low"] if "low" in df_ind.columns else df_ind["Low"]
+            vol_s = df_ind["volume"] if "volume" in df_ind.columns else df_ind["Volume"]
 
-        c_cur = float(close_s.iloc[-1])
-        c_prev = float(close_s.iloc[-2]) if len(close_s) >= 2 else c_cur
-        rsi_val = float(analysis.get("rsi", 50.0))
+            c_cur = float(close_s.iloc[-1])
+            rsi_val = float(analysis.get("rsi", 50.0))
 
-        # RSI manual threshold filter
-        if not (rsi_min_max[0] <= rsi_val <= rsi_min_max[1]):
-            continue
+            if not (rsi_min_max[0] <= rsi_val <= rsi_min_max[1]):
+                return None
 
-        # 20D Highest High (prior 20 bars)
-        high_20d_prev = float(high_s.iloc[-21:-1].max()) if len(high_s) >= 21 else float(high_s.max())
-        is_breakout_20d = (c_cur >= high_20d_prev)
+            high_20d_prev = float(high_s.iloc[-21:-1].max()) if len(high_s) >= 21 else float(high_s.max())
+            is_breakout_20d = (c_cur >= high_20d_prev)
 
-        # Volume SMA20 & Ratio
-        vol_sma20 = float(vol_s.rolling(20, min_periods=5).mean().iloc[-1]) if len(vol_s) >= 5 else vol
-        cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else vol
-        vol_ratio = (cur_vol / vol_sma20) if vol_sma20 > 0 else 1.0
+            vol_sma20 = float(vol_s.rolling(20, min_periods=5).mean().iloc[-1]) if len(vol_s) >= 5 else vol
+            cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else vol
+            vol_ratio = (cur_vol / vol_sma20) if vol_sma20 > 0 else 1.0
 
-        # Moving Averages
-        e20_s = df_ind["EMA_20"] if "EMA_20" in df_ind.columns else close_s.ewm(span=20, adjust=False).mean()
-        e50_s = df_ind["EMA_50"] if "EMA_50" in df_ind.columns else (df_ind["SMA_50"] if "SMA_50" in df_ind.columns else close_s.ewm(span=50, adjust=False).mean())
-        e20_cur = float(e20_s.iloc[-1])
-        e50_cur = float(e50_s.iloc[-1])
+            e20_s = df_ind["EMA_20"] if "EMA_20" in df_ind.columns else close_s.ewm(span=20, adjust=False).mean()
+            e50_s = df_ind["EMA_50"] if "EMA_50" in df_ind.columns else (df_ind["SMA_50"] if "SMA_50" in df_ind.columns else close_s.ewm(span=50, adjust=False).mean())
+            e20_cur = float(e20_s.iloc[-1])
+            e50_cur = float(e50_s.iloc[-1])
 
-        # Bollinger Bands & Keltner Channels
-        bb_up = df_ind["BB_Upper"] if "BB_Upper" in df_ind.columns else close_s * 1.03
-        bb_lo = df_ind["BB_Lower"] if "BB_Lower" in df_ind.columns else close_s * 0.97
-        sma20 = df_ind["SMA_20"] if "SMA_20" in df_ind.columns else close_s
-        bb_width_series = (bb_up - bb_lo) / (sma20 + 1e-9)
-        cur_bbw = float(bb_width_series.iloc[-1]) if len(bb_width_series) > 0 else 0.05
-        min_bbw_20 = float(bb_width_series.iloc[-20:].min()) if len(bb_width_series) >= 20 else cur_bbw
-        cur_bb_up = float(bb_up.iloc[-1])
-        cur_bb_lo = float(bb_lo.iloc[-1])
+            bb_up = df_ind["BB_Upper"] if "BB_Upper" in df_ind.columns else close_s * 1.03
+            bb_lo = df_ind["BB_Lower"] if "BB_Lower" in df_ind.columns else close_s * 0.97
+            sma20 = df_ind["SMA_20"] if "SMA_20" in df_ind.columns else close_s
+            bb_width_series = (bb_up - bb_lo) / (sma20 + 1e-9)
+            cur_bbw = float(bb_width_series.iloc[-1]) if len(bb_width_series) > 0 else 0.05
+            min_bbw_20 = float(bb_width_series.iloc[-20:].min()) if len(bb_width_series) >= 20 else cur_bbw
+            cur_bb_up = float(bb_up.iloc[-1])
+            cur_bb_lo = float(bb_lo.iloc[-1])
 
-        kc_up = df_ind["KC_Upper"] if "KC_Upper" in df_ind.columns else (e20_s + 1.5 * (high_s - low_s).rolling(14).mean())
-        kc_lo = df_ind["KC_Lower"] if "KC_Lower" in df_ind.columns else (e20_s - 1.5 * (high_s - low_s).rolling(14).mean())
-        cur_kc_up = float(kc_up.iloc[-1]) if len(kc_up) > 0 else cur_bb_up * 1.01
-        cur_kc_lo = float(kc_lo.iloc[-1]) if len(kc_lo) > 0 else cur_bb_lo * 0.99
+            kc_up = df_ind["KC_Upper"] if "KC_Upper" in df_ind.columns else (e20_s + 1.5 * (high_s - low_s).rolling(14).mean())
+            kc_lo = df_ind["KC_Lower"] if "KC_Lower" in df_ind.columns else (e20_s - 1.5 * (high_s - low_s).rolling(14).mean())
+            cur_kc_up = float(kc_up.iloc[-1]) if len(kc_up) > 0 else cur_bb_up * 1.01
+            cur_kc_lo = float(kc_lo.iloc[-1]) if len(kc_lo) > 0 else cur_bb_lo * 0.99
 
-        bb_inside_kc = (cur_bb_up <= cur_kc_up) and (cur_bb_lo >= cur_kc_lo)
-        is_squeeze = bb_inside_kc or (cur_bbw <= min_bbw_20 * 1.25)
+            bb_inside_kc = (cur_bb_up <= cur_kc_up) and (cur_bb_lo >= cur_kc_lo)
+            is_squeeze = bb_inside_kc or (cur_bbw <= min_bbw_20 * 1.25)
 
-        # 3-session volume contraction
-        vol_declining_3d = (len(vol_s) >= 3) and (vol_s.iloc[-1] < vol_s.iloc[-2] < vol_s.iloc[-3])
-        vol_contracting = vol_declining_3d or (vol_ratio <= 0.90 and len(vol_s) >= 2 and vol_s.iloc[-1] < vol_s.iloc[-2])
+            vol_declining_3d = (len(vol_s) >= 3) and (vol_s.iloc[-1] < vol_s.iloc[-2] < vol_s.iloc[-3])
+            vol_contracting = vol_declining_3d or (vol_ratio <= 0.90 and len(vol_s) >= 2 and vol_s.iloc[-1] < vol_s.iloc[-2])
 
-        # Candlestick Pattern check
-        patterns = detect_candlestick_patterns(df_ind)
-        bullish_candle = next((p for p in patterns if p["bias"] == "Bullish"), None)
-        candle_name = bullish_candle["pattern"] if bullish_candle else None
+            patterns = detect_candlestick_patterns(df_ind)
+            bullish_candle = next((p for p in patterns if p["bias"] == "Bullish"), None)
+            candle_name = bullish_candle["pattern"] if bullish_candle else None
 
-        # --- EVALUATE PRESETS ---
-        matched_presets = []
-        catalyst_descriptions = []
+            matched_presets = []
+            catalyst_descriptions = []
 
-        # Preset 1: High-Volume Momentum Breakout
-        # Close breaks above 20-day Highest High; Volume >= 1.5x 20-day SMA; RSI(14) > 55 and < 75
-        is_p1 = is_breakout_20d and (vol_ratio >= 1.50) and (55.0 <= rsi_val <= 75.0)
-        if is_p1:
-            matched_presets.append("🚀 Momentum Breakout")
-            catalyst_descriptions.append(f"20D High Breakout (Tk {high_20d_prev:.2f}) + Volume Surge ({vol_ratio:.1f}x) + RSI Momentum ({rsi_val:.1f})")
+            is_p1 = (is_breakout_20d or (c_cur >= high_20d_prev * 0.99 and c_cur > e20_cur)) and (vol_ratio >= 1.10) and (48.0 <= rsi_val <= 80.0)
+            if is_p1:
+                matched_presets.append("🚀 Momentum Breakout")
+                catalyst_descriptions.append(f"20D High Breakout (Tk {high_20d_prev:.2f}) + Volume Surge ({vol_ratio:.1f}x) + RSI Momentum ({rsi_val:.1f})")
 
-        # Preset 2: Oversold Dip Buyers (Mean Reversion)
-        # Price touching or bouncing from Lower BB or 50 EMA; RSI(14) bouncing up from < 35-42; Bullish reversal candlestick detected
-        touch_support = (float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 and c_cur >= cur_bb_lo * 0.99) or (float(low_s.iloc[-1]) <= e50_cur * 1.015 and c_cur >= e50_cur * 0.99)
-        rsi_prev_v = float(df_ind["RSI"].iloc[-2]) if ("RSI" in df_ind.columns and len(df_ind) >= 2) else rsi_val
-        rsi_oversold = (rsi_val <= 42.0) or (rsi_prev_v <= 35.0 and rsi_val >= rsi_prev_v) or (rsi_val <= 38.0)
-        is_p2 = touch_support and rsi_oversold and (bullish_candle is not None)
-        if is_p2:
-            matched_presets.append("🌊 Oversold Dip Buy")
-            sup_tag = "Lower BB" if float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 else "50 EMA"
-            catalyst_descriptions.append(f"Oversold Rebound (RSI {rsi_val:.1f}) at {sup_tag} + {candle_name} Candle")
+            touch_support = (float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 and c_cur >= cur_bb_lo * 0.99) or (float(low_s.iloc[-1]) <= e50_cur * 1.015 and c_cur >= e50_cur * 0.99)
+            rsi_prev_v = float(df_ind["RSI"].iloc[-2]) if ("RSI" in df_ind.columns and len(df_ind) >= 2) else rsi_val
+            rsi_oversold = (rsi_val <= 42.0) or (rsi_prev_v <= 35.0 and rsi_val >= rsi_prev_v) or (rsi_val <= 38.0)
+            is_p2 = touch_support or (rsi_oversold and c_cur >= float(low_s.iloc[-1]))
+            if is_p2:
+                matched_presets.append("🌊 Oversold Dip Buy")
+                sup_tag = "Lower BB" if float(low_s.iloc[-1]) <= cur_bb_lo * 1.015 else "50 EMA / Support Zone"
+                catalyst_descriptions.append(f"Oversold Rebound (RSI {rsi_val:.1f}) at {sup_tag}" + (f" + {candle_name}" if candle_name else ""))
 
-        # Preset 3: Consolidation Squeeze
-        # Bollinger Bands inside Keltner Channels (or BB width at multi-week lows); Declining volume over 3 consecutive sessions
-        is_p3 = is_squeeze and vol_contracting
-        if is_p3:
-            matched_presets.append("🗜️ Squeeze Compression")
-            catalyst_descriptions.append(f"Bollinger Squeeze (Width: {cur_bbw*100:.1f}%) + 3-Session Volume Contraction")
+            is_p3 = is_squeeze or vol_contracting
+            if is_p3:
+                matched_presets.append("🗜️ Squeeze Compression")
+                catalyst_descriptions.append(f"Bollinger Squeeze (Width: {cur_bbw*100:.1f}%) + 3-Session Volume Contraction")
 
-        # Fallback Baseline Catalyst if not matching specific presets
-        if not catalyst_descriptions:
-            if c_cur > e20_cur:
-                catalyst_descriptions.append(f"Above 20 EMA (Tk {e20_cur:.2f}) with RSI {rsi_val:.1f}")
+            if not catalyst_descriptions:
+                if c_cur > e20_cur:
+                    catalyst_descriptions.append(f"Above 20 EMA (Tk {e20_cur:.2f}) with RSI {rsi_val:.1f}")
+                else:
+                    catalyst_descriptions.append(f"Consolidation near Support with RSI {rsi_val:.1f}")
+
+            setup = analysis.get("stock_setup", {})
+            atr = setup.get("atr", float(df_ind["ATR"].iloc[-1]) if ("ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025))
+            if atr <= 0: atr = ltp * 0.025
+            buy_low = round(min(ltp * 0.99, max(0.1, e20_cur * 0.995)), 2)
+            buy_high = round(ltp * 1.005, 2)
+            stop_loss = setup.get("floor", round(max(0.1, ltp - (1.2 * atr)), 2))
+            target_p = setup.get("target", round(ltp + (1.5 * atr), 2))
+            action_verdict = setup.get("signal", analysis.get("action", "HOLD"))
+
+            include_stock = False
+            if preset_mode.startswith("🌟 All Matching"):
+                include_stock = len(matched_presets) > 0 or analysis.get("score", 0) >= 50
+            elif preset_mode.startswith("🚀 Preset 1"):
+                include_stock = is_p1
+            elif preset_mode.startswith("🌊 Preset 2"):
+                include_stock = is_p2
+            elif preset_mode.startswith("🗜️ Preset 3"):
+                include_stock = is_p3
             else:
-                catalyst_descriptions.append(f"Consolidation near Support with RSI {rsi_val:.1f}")
+                include_stock = True
 
-        # ATR & Order Plan Levels (SSOT Alignment)
-        setup = analysis.get("stock_setup", {})
-        atr = setup.get("atr", float(df_ind["ATR"].iloc[-1]) if ("ATR" in df_ind.columns and pd.notnull(df_ind["ATR"].iloc[-1])) else (ltp * 0.025))
-        if atr <= 0: atr = ltp * 0.025
-        buy_low = round(min(ltp * 0.99, max(0.1, e20_cur * 0.995)), 2)
-        buy_high = round(ltp * 1.005, 2)
-        stop_loss = setup.get("floor", round(max(0.1, ltp - (1.2 * atr)), 2))
-        target_p = setup.get("target", round(ltp + (1.5 * atr), 2))
-        action_verdict = setup.get("signal", analysis.get("action", "HOLD"))
-        score_num = setup.get("score", analysis.get("score", 0))
+            if search_sym.strip():
+                q_sc = search_sym.strip().lower()
+                if not (q_sc in sym.lower() or q_sc in analysis.get("name", "").lower()):
+                    include_stock = False
 
-        # Preset Filtering Logic
-        include_stock = False
-        if preset_mode.startswith("🌟 All Matching"):
-            include_stock = len(matched_presets) > 0
-        elif preset_mode.startswith("🚀 Preset 1"):
-            include_stock = is_p1
-        elif preset_mode.startswith("🌊 Preset 2"):
-            include_stock = is_p2
-        elif preset_mode.startswith("🗜️ Preset 3"):
-            include_stock = is_p3
-        else:  # Full Market Screener
-            include_stock = True
+            if include_stock:
+                return {
+                    "Ticker": sym,
+                    "Matched Preset": " • ".join(matched_presets) if matched_presets else "Baseline Technical",
+                    "Current Close (LTP)": f"Tk {ltp:.2f}",
+                    "Change (%)": f"{chg:+.2f} ({pct:+.2f}%)",
+                    "Volume": f"{int(vol):,}",
+                    "Volume Ratio": f"{vol_ratio:.2f}x",
+                    "RSI (14)": f"{rsi_val:.1f}",
+                    "Primary Catalyst & Condition Triggers": " • ".join(catalyst_descriptions),
+                    "Suggested Buy Zone": f"Tk {buy_low:.2f} – {buy_high:.2f}",
+                    "Stop Loss": f"Tk {stop_loss:.2f}",
+                    "Target (30D)": f"Tk {target_p:.2f}",
+                    "Verdict": action_verdict,
+                    "raw_score": analysis.get("score", 0),
+                    "raw_ltp": ltp,
+                    "raw_vol": vol,
+                    "raw_vol_ratio": vol_ratio,
+                    "raw_rsi": rsi_val,
+                    "raw_pct": pct
+                }
+            return None
+        except Exception:
+            return None
 
-        if search_sym.strip():
-            q_sc = search_sym.strip().lower()
-            if not (q_sc in sym.lower() or q_sc in analysis.get("name", "").lower()):
-                include_stock = False
-
-        if include_stock:
-            screener_results.append({
-                "Ticker": sym,
-                "Matched Preset": " • ".join(matched_presets) if matched_presets else "Baseline Technical",
-                "Current Close (LTP)": f"Tk {ltp:.2f}",
-                "Change (%)": f"{chg:+.2f} ({pct:+.2f}%)",
-                "Volume": f"{int(vol):,}",
-                "Volume Ratio": f"{vol_ratio:.2f}x",
-                "RSI (14)": f"{rsi_val:.1f}",
-                "Primary Catalyst & Condition Triggers": " • ".join(catalyst_descriptions),
-                "Suggested Buy Zone": f"Tk {buy_low:.2f} – {buy_high:.2f}",
-                "Stop Loss": f"Tk {stop_loss:.2f}",
-                "Target (30D)": f"Tk {target_p:.2f}",
-                "Verdict": action_verdict,
-                "raw_score": analysis.get("score", 0),
-                "raw_ltp": ltp,
-                "raw_vol": vol,
-                "raw_vol_ratio": vol_ratio,
-                "raw_rsi": rsi_val,
-                "raw_pct": pct
-            })
-
-    # Sort results by Volume Ratio / Score descending
-    screener_results.sort(key=lambda x: (x["raw_vol_ratio"], x["raw_score"]), reverse=True)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        evaluated_sc = list(executor.map(evaluate_screener_single, candidate_symbols))
+    screener_results = [r for r in evaluated_sc if r is not None]
 
     # 4. Summary Metrics Bar
     p1_hits = sum(1 for r in screener_results if "Momentum Breakout" in r["Matched Preset"])
@@ -5877,7 +5930,71 @@ with tab_patterns:
         all_symbols = [s["symbol"] for s in WATCHLIST_STOCKS]
 
     # Pre-scan candidate pool (Watchlist + Top active volume stocks)
-    candidate_symbols = list(dict.fromkeys([s["symbol"] for s in WATCHLIST_STOCKS] + sorted(all_symbols, key=lambda s: unified_quotes.get(s, {}).get("volume", 0), reverse=True)[:35]))
+    candidate_symbols = list(dict.fromkeys([s["symbol"] for s in WATCHLIST_STOCKS] + sorted(all_symbols, key=lambda s: float(unified_quotes.get(s, {}).get("volume", 0)), reverse=True)[:35]))
+
+    def evaluate_pattern_item(sym):
+        try:
+            q = unified_quotes.get(sym, {})
+            ltp = float(q.get("ltp", 0.0))
+            if ltp <= 0:
+                return None
+            high = float(q.get("high", ltp))
+            low = float(q.get("low", ltp))
+            vol = float(q.get("volume", 0.0))
+            ycp = float(q.get("ycp", ltp))
+            chg = float(q.get("change", 0.0))
+            pct = float(q.get("pct_change", 0.0))
+
+            analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
+            setup = analysis.get("stock_setup", {})
+            if not setup:
+                return None
+                
+            c_pats = analysis.get("patterns", [])
+            has_pattern = (setup.get("pattern") != "No Distinct Pattern") or (len(c_pats) > 0)
+            sc = int(setup.get("score", 50))
+            pct_v = float(setup.get("pct_change", 0.0))
+
+            if has_pattern or sc >= 52 or (sc < 38 and pct_v < 0):
+                if sc >= 75 and pct_v > 0:
+                    bias_label = "🟢 Bullish Breakout"
+                    b_type = "bullish"
+                elif sc >= 55:
+                    bias_label = "🟢 Bullish Setup"
+                    b_type = "bullish"
+                elif sc < 35 and pct_v < 0:
+                    bias_label = "🔴 Bearish Breakdown"
+                    b_type = "bearish"
+                else:
+                    bias_label = "⚪ Consolidating / Range"
+                    b_type = "neutral"
+
+                has_candle = (setup.get("pattern") != "No Distinct Pattern")
+                chart_pat_names = [p["name"] for p in c_pats]
+                chart_str = ", ".join(chart_pat_names) if chart_pat_names else "Consolidating / Range"
+                candle_str = setup.get("pattern", "No Distinct Pattern")
+
+                record = {
+                    "SYMBOL": sym,
+                    "LTP (Tk)": f"Tk {float(setup.get('close', ltp)):.2f}",
+                    "CHANGE (%)": f"{'+' if pct_v > 0 else ''}{pct_v:.2f}%",
+                    "SCORE": f"{sc} / 100",
+                    "SIGNAL": setup.get("signal", "HOLD"),
+                    "BIAS": bias_label,
+                    "CHART PATTERNS": chart_str,
+                    "CANDLESTICK TRIGGERS": candle_str,
+                    "TARGET (Tk)": f"Tk {float(setup.get('target', ltp * 1.05)):.2f}",
+                    "STOP LOSS (Tk)": f"Tk {float(setup.get('floor', ltp * 0.98)):.2f}",
+                    "bias_type": b_type,
+                    "has_candle": has_candle
+                }
+                return (sym, record)
+            return None
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        pattern_eval_results = list(executor.map(evaluate_pattern_item, candidate_symbols))
 
     active_pattern_stocks = []
     pattern_market_records = []
@@ -5885,61 +6002,21 @@ with tab_patterns:
     bearish_pat_count = 0
     candle_trigger_count = 0
 
-    for sym in candidate_symbols:
-        q = unified_quotes.get(sym, {})
-        ltp = float(q.get("ltp", 0.0))
-        high = float(q.get("high", 0.0))
-        low = float(q.get("low", 0.0))
-        vol = float(q.get("volume", 0.0))
-        ycp = float(q.get("ycp", 0.0))
-        chg = float(q.get("change", 0.0))
-        pct = float(q.get("pct_change", 0.0))
-
-        analysis = get_comprehensive_stock_analysis(sym, ltp, high, low, vol, ycp, chg, pct)
-        setup = analysis.get("stock_setup", {})
-        if not setup:
-            continue
-            
-        c_pats = analysis.get("patterns", [])
-        has_pattern = (setup.get("pattern") != "No Distinct Pattern") or (len(c_pats) > 0)
-        
-        if has_pattern or setup.get("score", 0) >= 55 or (setup.get("score", 0) < 35 and setup.get("pct_change", 0) < 0):
+    for item in pattern_eval_results:
+        if item is not None:
+            sym, rec = item
             active_pattern_stocks.append(sym)
-
-            # Immutable Unified Bias directly from SSOT
-            sc = setup.get("score", 50)
-            pct_v = setup.get("pct_change", 0.0)
-            if sc >= 75 and pct_v > 0:
-                bias_label = "🟢 Bullish Breakout"
+            pattern_market_records.append(rec)
+            if rec["bias_type"] == "bullish":
                 bullish_pat_count += 1
-            elif sc >= 55:
-                bias_label = "🟢 Bullish Setup"
-                bullish_pat_count += 1
-            elif sc < 35 and pct_v < 0:
-                bias_label = "🔴 Bearish Breakdown"
+            elif rec["bias_type"] == "bearish":
                 bearish_pat_count += 1
-            else:
-                bias_label = "⚪ Consolidating / Range"
-
-            if setup.get("pattern") != "No Distinct Pattern":
+            if rec["has_candle"]:
                 candle_trigger_count += 1
 
-            chart_pat_names = [p["name"] for p in c_pats]
-            chart_str = ", ".join(chart_pat_names) if chart_pat_names else "Consolidating / Range"
-            candle_str = setup.get("pattern", "No Distinct Pattern")
-
-            pattern_market_records.append({
-                "SYMBOL": sym,
-                "LTP (Tk)": setup.get("close", ltp),
-                "CHANGE (%)": f"{'+' if setup.get('pct_change', 0) > 0 else ''}{setup.get('pct_change', 0):.2f}%",
-                "SCORE": f"{sc} / 100",
-                "SIGNAL": setup.get("signal", "HOLD"),
-                "BIAS": bias_label,
-                "CHART PATTERNS": chart_str,
-                "CANDLESTICK TRIGGERS": candle_str,
-                "TARGET (Tk)": setup.get("target", ltp * 1.05),
-                "STOP LOSS (Tk)": setup.get("floor", ltp * 0.98)
-            })
+    # If no pattern detected in pool, fallback to top watchlist items so UI is never blank
+    if not active_pattern_stocks:
+        active_pattern_stocks = [s["symbol"] for s in WATCHLIST_STOCKS[:8]]
 
     # Summary Metrics Row
     pm_c1, pm_c2, pm_c3, pm_c4 = st.columns(4)
@@ -5987,10 +6064,10 @@ with tab_patterns:
     if selected_stock:
         q_sel = unified_quotes.get(selected_stock, {})
         ltp_sel = float(q_sel.get("ltp", 0.0))
-        high_sel = float(q_sel.get("high", 0.0))
-        low_sel = float(q_sel.get("low", 0.0))
+        high_sel = float(q_sel.get("high", ltp_sel))
+        low_sel = float(q_sel.get("low", ltp_sel))
         vol_sel = float(q_sel.get("volume", 0.0))
-        ycp_sel = float(q_sel.get("ycp", 0.0))
+        ycp_sel = float(q_sel.get("ycp", ltp_sel))
         chg_sel = float(q_sel.get("change", 0.0))
         pct_sel = float(q_sel.get("pct_change", 0.0))
 
@@ -6009,9 +6086,9 @@ with tab_patterns:
         <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
             <div>
                 <span style="font-size: 20px; font-weight: 900; color: #0f172a; margin-right: 8px;">{selected_stock}</span>
-                <span style="font-size: 14px; font-weight: 800; color: {'#00C853' if chg_sel >= 0 else '#D50000'};">Tk {ltp_sel:.1f} ({'+' if pct_sel > 0 else ''}{pct_sel:.2f}%)</span>
+                <span style="font-size: 14px; font-weight: 800; color: {'#00C853' if chg_sel >= 0 else '#D50000'};">Tk {ltp_sel:.2f} ({'+' if pct_sel > 0 else ''}{pct_sel:.2f}%)</span>
                 <div style="font-size: 12px; color: #64748b; margin-top: 2px;">
-                    Day Range: Tk {low_sel:.1f} – {high_sel:.1f} • Vol: {int(vol_sel):,} • Action: <b style="color: {stock_analysis['color']};">{stock_analysis['action']}</b>
+                    Day Range: Tk {low_sel:.2f} – {high_sel:.2f} • Vol: {int(vol_sel):,} • Action: <b style="color: {stock_analysis['color']};">{stock_analysis['action']}</b>
                 </div>
             </div>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
@@ -6083,7 +6160,10 @@ with tab_patterns:
         pattern_fig = build_pattern_chart(
             analyzed_df, selected_stock, detected_chart_patterns, detected_candle_patterns
         )
-        st.plotly_chart(pattern_fig, use_container_width=True)
+        try:
+            st.plotly_chart(pattern_fig, width="stretch")
+        except Exception:
+            st.plotly_chart(pattern_fig, use_container_width=True)
 
         # Educational & Trade Execution Guide
         st.markdown(f"""
@@ -6116,16 +6196,29 @@ with tab_patterns:
 
         filtered_pat_table = pattern_market_records
         if bias_filter == "🟢 Bullish Setup Only":
-            filtered_pat_table = [r for r in filtered_pat_table if "Bullish" in r["BIAS"]]
+            filtered_pat_table = [r for r in filtered_pat_table if "Bullish" in r.get("BIAS", "")]
         elif bias_filter == "🔴 Bearish Warning Only":
-            filtered_pat_table = [r for r in filtered_pat_table if "Bearish" in r["BIAS"]]
+            filtered_pat_table = [r for r in filtered_pat_table if "Bearish" in r.get("BIAS", "")]
         elif bias_filter == "⚪ Neutral / Bilateral Only":
-            filtered_pat_table = [r for r in filtered_pat_table if "Neutral" in r["BIAS"]]
+            filtered_pat_table = [r for r in filtered_pat_table if "Neutral" in r.get("BIAS", "") or "Consolidating" in r.get("BIAS", "")]
 
         if tbl_search.strip():
             q_pat = tbl_search.strip().lower()
-            filtered_pat_table = [r for r in filtered_pat_table if q_pat in r["SYMBOL"].lower() or q_pat in r["CHART PATTERNS"].lower() or q_pat in r["CANDLESTICK TRIGGERS"].lower()]
+            filtered_pat_table = [r for r in filtered_pat_table if q_pat in r.get("SYMBOL", "").lower() or q_pat in r.get("CHART PATTERNS", "").lower() or q_pat in r.get("CANDLESTICK TRIGGERS", "").lower()]
 
-        st.dataframe(pd.DataFrame(filtered_pat_table), width="stretch", hide_index=True)
+        clean_table_display = [{
+            "SYMBOL": r["SYMBOL"],
+            "LTP": r["LTP (Tk)"],
+            "CHANGE (%)": r["CHANGE (%)"],
+            "SCORE": r["SCORE"],
+            "SIGNAL": r["SIGNAL"],
+            "BIAS": r["BIAS"],
+            "CHART PATTERNS": r["CHART PATTERNS"],
+            "CANDLESTICK TRIGGERS": r["CANDLESTICK TRIGGERS"],
+            "TARGET": r["TARGET (Tk)"],
+            "STOP LOSS": r["STOP LOSS (Tk)"]
+        } for r in filtered_pat_table]
+
+        st.dataframe(pd.DataFrame(clean_table_display), width="stretch", hide_index=True)
     else:
         st.info("🔄 Scanning market for active patterns... Please refresh in a moment.")

@@ -102,9 +102,10 @@ def evaluate_institutional_entry(
     if is_breakdown and (declined > advanced or breadth_pct <= 40.0):
         # 1. Severe Breakdown / Risk Off
         decision = "ABORT_BREAKDOWN"
-        command = "ABORT TRADE"
-        command_badge = "ABORT TRADE (এন্ট্রি সম্পূর্ণ নিষিদ্ধ)"
-        action_badge = "🔴 এন্ট্রি সম্পূর্ণ নিষিদ্ধ — সাপোর্ট ভেঙে পতন (Breakdown)"
+        command = "NO BUYING"
+        command_badge = "BUYING FORBIDDEN (ক্রয় সম্পূর্ণ নিষিদ্ধ)"
+        action_badge = "🔴 ক্রয় সম্পূর্ণ নিষিদ্ধ — সাপোর্ট ভেঙে পতন"
+        buy_instruction = "⛔ ক্রয় সম্পূর্ণ নিষিদ্ধ (ডাউনট্রেন্ড ও সাপোর্ট ব্রেকডাউন)"
         detail_text = (
             f"সূচক প্রধান সাপোর্ট {support_level:,.1f} ভেঙে নিচে অবস্থান করছে ({declined}টি শেয়ার পতন)। "
             f"ডাউনট্রেন্ড কার্যকর থাকায় নতুন ক্যাপিটাল ডিপ্লয় বন্ধ রেখে স্টপ লস নিশ্চিত করুন।"
@@ -120,10 +121,11 @@ def evaluate_institutional_entry(
         decision = "CONFIRMED_EXECUTION"
         command = "BUY NOW"
         command_badge = "BUY NOW (তাৎক্ষণিক বাই একশন)"
-        action_badge = "🟢 স্ট্রং বাই কনফার্মড — শক্তিশালী প্রাতিষ্ঠানিক ব্রেকআউট"
+        action_badge = "🟢 স্ট্রং বাই একশন — প্রাতিষ্ঠানিক ব্রেকআউট"
+        buy_instruction = "🚀 বাই একশন সক্রিয় (সেরা ১৫টি লিডার স্টকে এন্ট্রি নিন)"
         detail_text = (
             f"মার্কেটে শক্তিশালী প্রাতিষ্ঠানিক বাই মোমেন্টাম সক্রিয় (টার্নওভার: {market_turnover_cr:,.1f} কোটি টাকা, "
-            f"ব্রেডথ: {advanced}টি আপ বনাম {declined}টি ডাউন)। সেরা ১৫টি লিডার শেয়ারে ১০০% ট্রেডিং পজিশন কার্যকর করার অনুকূল সময়।"
+            f"ব্রেডথ: {advanced}টি আপ বনাম {declined}টি ডাউন)। সেরা ১৫টি লিডার শেয়ারে পজিশন নেওয়ার অনুকূল পরিবেশ।"
         )
         confidence = 95
         color = "#00C853"
@@ -131,18 +133,19 @@ def evaluate_institutional_entry(
         border_color = "#86efac"
         command_color = "#15803d"
 
-    elif near_resistance:
+    elif near_resistance and breadth_pct < 75.0:
         # 3. Reaching Upper Supply Resistance Cluster
         decision = "TAKE_PROFIT"
-        command = "TAKE PROFIT"
-        command_badge = "TAKE PROFIT (৫০% প্রফিট লক)"
-        action_badge = "🛑 রেজিস্ট্যান্স প্রফিট টেকিং — ক্যাশ রেশিও বৃদ্ধি করুন"
+        command = "HOLD OFF BUYING"
+        command_badge = "HOLD OFF BUYING (নতুন ক্রয় স্থগিত)"
+        action_badge = "🛑 রেজিস্ট্যান্সে প্রফিট টেকিং — নতুন আগ্রাসী বাই স্থগিত"
+        buy_instruction = "🚫 নতুন ক্রয় স্থগিত (রেজিস্ট্যান্স ব্রেকআউট ছাড়া বাই নয়)"
         detail_text = (
             f"সূচক প্রধান রেজিস্ট্যান্স সিলিং {resistance_level:,.1f}-এর সন্নিকটে অবস্থান করছে। "
-            f"শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট বুক করে ক্যাপিটাল নিরাপদ রাখুন।"
+            f"নতুন আগ্রাসী বাই এড়িয়ে শর্ট-টার্ম সুইং ট্রেডে ৫০%-৭০% প্রফিট বুক করে ক্যাপিটাল নিরাপদ রাখুন।"
         )
         confidence = 85
-        color = "#D50000"
+        color = "#dc2626"
         bg_color = "#fef2f2"
         border_color = "#fca5a5"
         command_color = "#991b1b"
@@ -153,6 +156,7 @@ def evaluate_institutional_entry(
         command = "ACCUMULATE 50%"
         command_badge = "ACCUMULATE 50% (সাপোর্ট ডিপ)"
         action_badge = "🔵 ভ্যালু ডিপ অ্যাকুমুলেশন — কিস্তিতে ক্রয় অনুমোদিত"
+        buy_instruction = "🎯 ডিপে অ্যাকুমুলেশন (সাপোর্ট বাউন্স স্টকে ৩০%-৫০% বাই)"
         detail_text = (
             f"সূচক সাপোর্ট জোন {support_level:,.1f}-এ সফলভাবে বাউন্স টেস্ট করছে (ভলিউম রান-রেট: {projected_vol_ratio:.2f}x)। "
             f"ফান্ডামেন্টাল ভ্যালু শেয়ারগুলোতে ৫০% ক্যাপিটালে কিস্তিতে পজিশন নিন।"
@@ -169,6 +173,7 @@ def evaluate_institutional_entry(
         command = "ACCUMULATE 30%"
         command_badge = "ACCUMULATE 30% (সিলেক্টিভ এন্ট্রি)"
         action_badge = "🟡 সিলেক্টিভ এন্ট্রি — কনসোলিডেশন রেঞ্জ"
+        buy_instruction = "⚡ বাছাইকৃত ক্রয় (কেবলমাত্র চার্ট ব্রেকআউট স্টকে ৩০% বাই)"
         detail_text = (
             f"মার্কেট {support_level:,.1f} থেকে {resistance_level:,.1f} রেঞ্জে ট্রেড করছে (ব্রেডথ: {advanced} আপ / {declined} ডাউন)। "
             f"কেবলমাত্র নিশ্চিত ব্রেকআউট সম্পন্ন সেরা স্টকগুলোতে ৩০% ক্যাপিটালে সীমাবদ্ধ থাকুন।"
@@ -184,6 +189,7 @@ def evaluate_institutional_entry(
         "action_badge": action_badge,
         "command": command,
         "command_badge": command_badge,
+        "buy_instruction": buy_instruction,
         "detail_text": detail_text,
         "projected_vol_ratio": projected_vol_ratio,
         "confidence_score": confidence,
