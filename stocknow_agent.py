@@ -260,18 +260,28 @@ def compute_technical_score(tech: Dict[str, Any]) -> Dict[str, Any]:
 
     total_score = ma_score + rsi_score + macd_score + vol_score
 
-    # 5. Signal Thresholds:
-    # 80-100: STRONG BUY | 60-79: BUY | 40-59: HOLD | 20-39: SELL | 0-19: STRONG SELL
+    # 5. Signal Thresholds & Visual Palette:
+    # Green for Buy, Red for Sell, Yellow for Hold
     if total_score >= 80:
         signal = "STRONG BUY"
+        color = "#16a34a"
+        color_badge = "🟢 STRONG BUY"
     elif total_score >= 60:
         signal = "BUY"
+        color = "#16a34a"
+        color_badge = "🟢 BUY"
     elif total_score >= 40:
         signal = "HOLD"
+        color = "#d97706"
+        color_badge = "🟡 HOLD"
     elif total_score >= 20:
         signal = "SELL"
+        color = "#dc2626"
+        color_badge = "🔴 SELL"
     else:
         signal = "STRONG SELL"
+        color = "#dc2626"
+        color_badge = "🔴 STRONG SELL"
 
     return {
         "ma_score": ma_score,
@@ -279,7 +289,9 @@ def compute_technical_score(tech: Dict[str, Any]) -> Dict[str, Any]:
         "macd_score": macd_score,
         "vol_score": vol_score,
         "total_score": total_score,
-        "signal": signal
+        "signal": signal,
+        "color": color,
+        "color_badge": color_badge
     }
 
 
@@ -295,14 +307,18 @@ def generate_trade_report(ticker: str) -> str:
 
     tech = calculate_technical_indicators(df)
     scores = compute_technical_score(tech)
+    
+    risk = max(0.05, abs(tech['ltp'] - tech['stop_loss']))
+    reward = max(0.05, abs(tech['target_price'] - tech['ltp']))
+    rrr = round(reward / risk, 2)
 
     report = f"""-------------------------------------------------
-Ticker: {sym} | Price: {tech['ltp']:.2f} | Signal: {scores['signal']} | Score: {scores['total_score']}/100
-- Trend (MA): {scores['ma_score']}/30
-- Momentum (RSI): {scores['rsi_score']}/25
-- MACD: {scores['macd_score']}/20
-- Volume: {scores['vol_score']}/25
-Key Levels -> Entry: {tech['entry_price']:.2f} | Target: {tech['target_price']:.2f} | Stop Loss: {tech['stop_loss']:.2f}
+Ticker: {sym} | Price: Tk {tech['ltp']:.2f} | Signal: {scores['color_badge']} | Score: {scores['total_score']}/100
+- Trend (Moving Averages): {scores['ma_score']}/30
+- Momentum (RSI 14D): {scores['rsi_score']}/25 (RSI: {tech['rsi_14']:.1f})
+- Trend Acceleration (MACD): {scores['macd_score']}/20
+- Liquidity & Price Action: {scores['vol_score']}/25 (Vol: {tech['vol_ratio']:.2f}x 20 VMA)
+Key Levels -> Entry: Tk {tech['entry_price']:.2f} | Target: Tk {tech['target_price']:.2f} | Stop Loss: Tk {tech['stop_loss']:.2f} | RRR: 1:{rrr:.2f}
 -------------------------------------------------"""
     return report
 

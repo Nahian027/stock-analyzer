@@ -632,7 +632,7 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
     # Signal and Order Classification
     if is_resistance_breakout and score_val >= 55:
         signal_val = "BUY — BREAKOUT"
-        order_badge_color = "#00C853"
+        order_badge_color = "#16a34a"
         order_badge_bg = "#f0fdf4"
         order_border = "#86efac"
         order_command = "🟢 EXECUTE BUY ORDER (ব্রেকআউট কনফার্মড)"
@@ -648,9 +648,9 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
         order_border = "#86efac"
         order_command = "🟢 EXECUTE BUY ORDER (সাপোর্ট বাউন্স)"
         trigger_tag = "🎯 সাপোর্ট রিবাউন্ড (Support Rebound)"
-        trigger_tag_bg = "#eff6ff"
-        trigger_tag_fg = "#1d4ed8"
-        trigger_tag_border = "#bfdbfe"
+        trigger_tag_bg = "#dcfce7"
+        trigger_tag_fg = "#15803d"
+        trigger_tag_border = "#86efac"
         action_detail = f"শেয়ারটি নিজস্ব প্রধান সাপোর্ট জোন ({floor_val:.2f}) থেকে রিবাউন্ড নিশ্চিত করছে (স্কোর: {score_val}/100, 5M RSI: {rsi_5m_val:.1f})। সাপোর্ট {floor_val:.2f}-এ স্টপ লস দিয়ে টার্গেট {target1_val:.2f} এর জন্য পজিশন নিন।"
     elif score_val >= 40:
         signal_val = "HOLD / AWAIT SETUP"
@@ -681,7 +681,7 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
         entry_zone_str = f"{entry_low:.2f}–{entry_high:.2f}"
         entry_confirm = entry_high
         entry_mid = (entry_low + entry_high) / 2.0
-    elif signal_val in ["WATCH", "HOLD"]:
+    elif signal_val in ["WATCH", "HOLD", "HOLD / AWAIT SETUP"]:
         entry_zone_str = f">{round(ltp_val + 0.5 * atr_val, 2):.2f}"
         entry_confirm = round(ltp_val + 0.5 * atr_val, 2)
         entry_mid = ltp_val + 0.5 * atr_val
@@ -700,13 +700,13 @@ def get_unified_stock_analysis_payload(sym: str, quotes_dict: dict = None) -> di
 
     if "BUY" in signal_val:
         move_txt = f"📈 বাড়বে ➔ Tk {target1_val:.2f} (+{target1_pct:.1f}%)"
-        move_col = "#00875A"
+        move_col = "#16a34a"
     elif "SELL" in signal_val:
         move_txt = f"📉 কমবে ➔ Tk {floor_val:.2f} ({floor_pct:.1f}%)"
-        move_col = "#DE350B"
+        move_col = "#dc2626"
     else:
         move_txt = f"⚖️ রেঞ্জ: {floor_val:.1f}–{target1_val:.1f}"
-        move_col = "#eab308"
+        move_col = "#d97706"
 
     setup_badge = classify_technical_setup_badge(
         setup, tech_indicators, pattern_val, rsi_1d_val, rsi_5m_val, ltp_val,
@@ -827,35 +827,31 @@ def render_mandatory_stock_card(c: dict, show_expander: bool = True):
     rrr_val = float(c.get("rrr", c.get("rr1", 1.5)))
     entry_zone_str = str(c.get("entry_zone", f"{ltp*0.99:.2f}–{ltp*1.01:.2f}"))
     
-    if signal_val in ["STRONG BUY", "BUY", "BUY — BREAKOUT", "BUY — PULLBACK", "BUY — REVERSAL"]:
-        sig_color = "#00C853"
+    if "BUY" in signal_val.upper() or signal_val in ["STRONG BUY", "BUY", "BUY — BREAKOUT", "BUY — PULLBACK", "BUY — REVERSAL", "BUY — SUPPORT REBOUND", "ACCUMULATE"]:
+        sig_color = "#16a34a"
         sig_blinker = "blink-dot-green"
         signal_badge = signal_val
-    elif signal_val in ["SELL", "STRONG SELL", "SELL / EXIT", "BEARISH BREAKDOWN"]:
-        sig_color = "#D50000"
-        sig_blinker = "blink-dot-red"
-        signal_badge = signal_val
-    elif "HIGH RISK" in signal_val:
-        sig_color = "#ea580c"
+    elif "SELL" in signal_val.upper() or signal_val in ["SELL", "STRONG SELL", "SELL / EXIT", "BEARISH BREAKDOWN", "EXIT", "AVOID", "HIGH RISK"]:
+        sig_color = "#dc2626"
         sig_blinker = "blink-dot-red"
         signal_badge = signal_val
     else:
-        sig_color = "#FFD600"
+        sig_color = "#d97706"
         sig_blinker = "blink-dot-yellow"
         signal_badge = signal_val
 
     move_txt = c.get("move_txt")
     move_col = c.get("move_col")
-    if not move_txt:
-        if signal_val in ["STRONG BUY", "BUY", "BUY — BREAKOUT", "BUY — PULLBACK", "BUY — REVERSAL"]:
+    if not move_txt or not move_col or move_col in ["#0284c7", "#00875A", "#DE350B", "#eab308"]:
+        if "BUY" in signal_val.upper():
             move_txt = f"📈 বাড়বে ➔ Tk {target1_val:.2f} (+{target_pct:.1f}%)"
-            move_col = "#00875A"
-        elif signal_val in ["SELL", "STRONG SELL", "SELL / EXIT", "BEARISH BREAKDOWN"]:
+            move_col = "#16a34a"
+        elif "SELL" in signal_val.upper() or "EXIT" in signal_val.upper() or "BREAKDOWN" in signal_val.upper():
             move_txt = f"📉 কমবে ➔ Tk {floor_val:.2f} ({floor_pct:.1f}%)"
-            move_col = "#DE350B"
+            move_col = "#dc2626"
         else:
             move_txt = f"⚖️ রেঞ্জ: {floor_val:.1f}–{target1_val:.1f}"
-            move_col = "#eab308"
+            move_col = "#d97706"
 
     # Top right badges: 1D and 5M with [Status]
     r1d_badge_html = f'<div style="background: {r1d_bg}; color: {r1d_fg}; border: 1px solid {r1d_border}; border-radius: 4px; padding: 1.5px 5px; font-size: 10px; font-weight: 800; white-space: nowrap; line-height: 1.2;" title="Daily (1D) 14-Period RSI">1D: {rsi_1d:.1f}</div>'
@@ -3452,9 +3448,9 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list = None, rsi_5m_data:
     """
     if df is None or len(df) < 2:
         return {
-            "score": 50, "action": "HOLD", "blinker_class": "blink-dot-yellow", "color": "#FFD600",
-            "move_dir": "⚖️ কনসোলিডেশন", "move_badge": "⚖️ কনসোলিডেশন", "move_color": "#0284c7",
-            "move_bg": "#f0f9ff", "move_border": "#bae6fd", "move_prob": 50.0,
+            "score": 50, "action": "HOLD", "blinker_class": "blink-dot-yellow", "color": "#d97706",
+            "move_dir": "⚖️ কনসোলিডেশন", "move_badge": "⚖️ কনসোলিডেশন", "move_color": "#d97706",
+            "move_bg": "#fefce8", "move_border": "#fef08a", "move_prob": 50.0,
             "target_price": 0.0, "target_selling_price": 0.0, "target_buying_price": 0.0,
             "turnaround_floor": 0.0, "next_target": 0.0, "highest_peak": 0.0,
             "stop_loss": 0.0, "rr_ratio": 1.5, "signals": [], "patterns": []
@@ -3476,39 +3472,39 @@ def evaluate_stock_signals(df: pd.DataFrame, patterns: list = None, rsi_5m_data:
     turnaround_floor = float(eval_res["floor"])
     next_target = float(eval_res["target"])
 
-    # Map signals and UI colors consistently
-    if sig_raw in ["STRONG BUY", "BUY"]:
+    # Map signals and UI colors consistently (Green for Buy, Red for Sell, Yellow for Hold)
+    if "BUY" in sig_raw.upper():
         action = "BUY"
         blinker_class = "blink-dot-green"
-        color = "#00C853"
+        color = "#16a34a"
         up_pct = round(((next_target - latest_price) / (latest_price + 1e-9)) * 100, 1)
         pat_str = f" ({eval_res['pattern']})" if eval_res['pattern'] != "No Distinct Pattern" else ""
         move_dir = f"📈 দাম বাড়বে{pat_str} — লক্ষ্যমাত্রা Tk {next_target:.2f} (+{up_pct:.1f}%)"
         move_badge = f"📈 বাড়বে → Tk {next_target:.2f} (+{up_pct:.1f}%)"
-        move_color = "#15803d"
+        move_color = "#16a34a"
         move_bg = "#f0fdf4"
         move_border = "#86efac"
         move_prob = min(94.0, round(65.0 + (final_score - 55) * 0.7, 1))
-    elif sig_raw in ["SELL", "STRONG SELL"]:
+    elif "SELL" in sig_raw.upper() or "EXIT" in sig_raw.upper() or "BREAKDOWN" in sig_raw.upper() or "AVOID" in sig_raw.upper():
         action = "SELL"
         blinker_class = "blink-dot-red"
-        color = "#D50000"
+        color = "#dc2626"
         down_pct = round(((latest_price - turnaround_floor) / (latest_price + 1e-9)) * 100, 1)
         move_dir = f"📉 দাম কমবে — রিভার্সাল ফ্লোর Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
         move_badge = f"📉 কমবে → Tk {turnaround_floor:.2f} (-{down_pct:.1f}%)"
-        move_color = "#b91c1c"
+        move_color = "#dc2626"
         move_bg = "#fef2f2"
         move_border = "#fca5a5"
         move_prob = min(94.0, round(65.0 + (40 - final_score) * 0.8, 1))
     else:
         action = "HOLD"
         blinker_class = "blink-dot-yellow"
-        color = "#FFD600"
+        color = "#d97706"
         move_dir = f"⚖️ কনসোলিডেশন (রেঞ্জ: Tk {turnaround_floor:.1f} – {next_target:.1f})"
         move_badge = f"⚖️ রেঞ্জ: {turnaround_floor:.1f}–{next_target:.1f}"
-        move_color = "#0284c7"
-        move_bg = "#f0f9ff"
-        move_border = "#bae6fd"
+        move_color = "#d97706"
+        move_bg = "#fefce8"
+        move_border = "#fef08a"
         move_prob = 50.0
 
     # Calculate Breakdown Signals
@@ -3640,13 +3636,13 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
             "stock_setup": stock_setup,
             "score": score_val,
             "action": action,
-            "blinker_class": "blink-dot-green" if action in ["BUY", "STRONG BUY"] else ("blink-dot-red" if action == "SELL" else "blink-dot-yellow"),
-            "color": "#00C853" if action == "STRONG BUY" else ("#16a34a" if action == "BUY" else ("#dc2626" if action == "SELL" else "#eab308")),
+            "blinker_class": "blink-dot-green" if "BUY" in str(action).upper() else ("blink-dot-red" if "SELL" in str(action).upper() else "blink-dot-yellow"),
+            "color": "#16a34a" if "BUY" in str(action).upper() else ("#dc2626" if "SELL" in str(action).upper() else "#d97706"),
             "move_dir": f"⚖️ রেঞ্জ: Tk {target_b:.1f}-{target_s:.1f}",
             "move_badge": f"⚖️ রেঞ্জ: {target_b:.1f}-{target_s:.1f}",
-            "move_color": "#0284c7",
-            "move_bg": "#f0f9ff",
-            "move_border": "#bae6fd",
+            "move_color": "#d97706",
+            "move_bg": "#fefce8",
+            "move_border": "#fef08a",
             "move_prob": 50.0,
             "target_selling_price": target_s,
             "target_buying_price": target_b,
@@ -3729,11 +3725,11 @@ def get_comprehensive_stock_analysis(sym: str, ltp: float, high: float, low: flo
         "setup_rrr": stock_setup["rrr"],
         "score": stock_setup["score"],
         "action": stock_setup["signal"],
-        "blinker_class": "blink-dot-green" if stock_setup["signal"] in ["BUY", "STRONG BUY"] else ("blink-dot-red" if stock_setup["signal"] == "SELL" else "blink-dot-yellow"),
-        "color": "#00C853" if stock_setup["signal"] == "STRONG BUY" else ("#16a34a" if stock_setup["signal"] == "BUY" else ("#dc2626" if stock_setup["signal"] == "SELL" else "#eab308")),
+        "blinker_class": "blink-dot-green" if "BUY" in str(stock_setup["signal"]).upper() else ("blink-dot-red" if "SELL" in str(stock_setup["signal"]).upper() else "blink-dot-yellow"),
+        "color": "#16a34a" if "BUY" in str(stock_setup["signal"]).upper() else ("#dc2626" if "SELL" in str(stock_setup["signal"]).upper() else "#d97706"),
         "move_dir": signals_data["move_dir"],
-        "move_badge": f"📈 বাড়বে → Tk {stock_setup['target']:.2f} (+{stock_setup['target_pct']:.1f}%)" if stock_setup["score"] >= 60 else f"📉 কমবে → Tk {stock_setup['floor']:.2f} ({stock_setup['floor_pct']:.1f}%)",
-        "move_color": "#15803d" if stock_setup["score"] >= 60 else ("#b91c1c" if stock_setup["score"] <= 35 else "#0284c7"),
+        "move_badge": f"📈 বাড়বে → Tk {stock_setup['target']:.2f} (+{stock_setup['target_pct']:.1f}%)" if "BUY" in str(stock_setup["signal"]).upper() else (f"📉 কমবে → Tk {stock_setup['floor']:.2f} ({stock_setup['floor_pct']:.1f}%)" if "SELL" in str(stock_setup["signal"]).upper() else f"⚖️ রেঞ্জ: {stock_setup['floor']:.1f}–{stock_setup['target']:.1f}"),
+        "move_color": "#16a34a" if "BUY" in str(stock_setup["signal"]).upper() else ("#dc2626" if "SELL" in str(stock_setup["signal"]).upper() else "#d97706"),
         "move_bg": signals_data["move_bg"],
         "move_border": signals_data["move_border"],
         "move_prob": signals_data["move_prob"],

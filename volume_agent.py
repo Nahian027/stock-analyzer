@@ -59,10 +59,10 @@ def evaluate_institutional_entry(
             "detail_text": "মার্কেট পর্যাপ্ত ডেটা লোড হওয়ার অপেক্ষায় রয়েছে। ক্যাপিটাল সুরক্ষিত রাখুন।",
             "projected_vol_ratio": 1.0,
             "confidence_score": 50,
-            "color": "#FFB300",
-            "bg_color": "#fffbeb",
-            "border_color": "#fde68a",
-            "command_color": "#b45309"
+            "color": "#d97706",
+            "bg_color": "#fefce8",
+            "border_color": "#fef08a",
+            "command_color": "#ca8a04"
         }
 
     # -------------------------------------------------------------
@@ -100,7 +100,7 @@ def evaluate_institutional_entry(
     # C. Dynamic Quantitative Execution Decision Matrix
     # -------------------------------------------------------------
     if is_breakdown and (declined > advanced or breadth_pct <= 40.0):
-        # 1. Severe Breakdown / Risk Off
+        # 1. Severe Breakdown / Risk Off (SELL)
         decision = "ABORT_BREAKDOWN"
         command = "NO BUYING"
         command_badge = "BUYING FORBIDDEN (ক্রয় সম্পূর্ণ নিষিদ্ধ)"
@@ -111,13 +111,13 @@ def evaluate_institutional_entry(
             f"ডাউনট্রেন্ড কার্যকর থাকায় নতুন ক্যাপিটাল ডিপ্লয় বন্ধ রেখে স্টপ লস নিশ্চিত করুন।"
         )
         confidence = 10
-        color = "#D50000"
+        color = "#dc2626"
         bg_color = "#fef2f2"
         border_color = "#fca5a5"
         command_color = "#991b1b"
 
     elif (breadth_pct >= 60.0 and (market_turnover_cr >= 800.0 or dsex_change_pct >= 0.50)) or (breadth_pct >= 75.0):
-        # 2. Strong Bullish Surge / High-Turnover Breakout
+        # 2. Strong Bullish Surge / High-Turnover Breakout (BUY)
         decision = "CONFIRMED_EXECUTION"
         command = "BUY NOW"
         command_badge = "BUY NOW (তাৎক্ষণিক বাই একশন)"
@@ -128,13 +128,13 @@ def evaluate_institutional_entry(
             f"ব্রেডথ: {advanced}টি আপ বনাম {declined}টি ডাউন)। সেরা ১৫টি লিডার শেয়ারে পজিশন নেওয়ার অনুকূল পরিবেশ।"
         )
         confidence = 95
-        color = "#00C853"
+        color = "#16a34a"
         bg_color = "#f0fdf4"
         border_color = "#86efac"
         command_color = "#15803d"
 
     elif near_resistance and breadth_pct < 75.0:
-        # 3. Reaching Upper Supply Resistance Cluster
+        # 3. Reaching Upper Supply Resistance Cluster (SELL / PROFIT TAKING)
         decision = "TAKE_PROFIT"
         command = "HOLD OFF BUYING"
         command_badge = "HOLD OFF BUYING (নতুন ক্রয় স্থগিত)"
@@ -151,24 +151,24 @@ def evaluate_institutional_entry(
         command_color = "#991b1b"
 
     elif in_demand_pocket:
-        # 4. Support Bounce Value Dip
+        # 4. Support Bounce Value Dip (BUY / ACCUMULATE)
         decision = "ACCUMULATE_SUPPORT"
         command = "ACCUMULATE 50%"
         command_badge = "ACCUMULATE 50% (সাপোর্ট ডিপ)"
-        action_badge = "🔵 ভ্যালু ডিপ অ্যাকুমুলেশন — কিস্তিতে ক্রয় অনুমোদিত"
+        action_badge = "🟢 ভ্যালু ডিপ অ্যাকুমুলেশন — কিস্তিতে ক্রয় অনুমোদিত"
         buy_instruction = "🎯 ডিপে অ্যাকুমুলেশন (সাপোর্ট বাউন্স স্টকে ৩০%-৫০% বাই)"
         detail_text = (
             f"সূচক সাপোর্ট জোন {support_level:,.1f}-এ সফলভাবে বাউন্স টেস্ট করছে (ভলিউম রান-রেট: {projected_vol_ratio:.2f}x)। "
             f"ফান্ডামেন্টাল ভ্যালু শেয়ারগুলোতে ৫০% ক্যাপিটালে কিস্তিতে পজিশন নিন।"
         )
         confidence = 80
-        color = "#1E88E5"
-        bg_color = "#eff6ff"
-        border_color = "#93c5fd"
-        command_color = "#1d4ed8"
+        color = "#16a34a"
+        bg_color = "#f0fdf4"
+        border_color = "#86efac"
+        command_color = "#15803d"
 
     else:
-        # 5. Rangebound Selective Stock Rotation
+        # 5. Rangebound Selective Stock Rotation (HOLD / SELECTIVE)
         decision = "SELECTIVE_ACCUMULATION"
         command = "ACCUMULATE 30%"
         command_badge = "ACCUMULATE 30% (সিলেক্টিভ এন্ট্রি)"
@@ -179,10 +179,10 @@ def evaluate_institutional_entry(
             f"কেবলমাত্র নিশ্চিত ব্রেকআউট সম্পন্ন সেরা স্টকগুলোতে ৩০% ক্যাপিটালে সীমাবদ্ধ থাকুন।"
         )
         confidence = 65
-        color = "#0284c7"
-        bg_color = "#f0f9ff"
-        border_color = "#bae6fd"
-        command_color = "#0369a1"
+        color = "#d97706"
+        bg_color = "#fefce8"
+        border_color = "#fef08a"
+        command_color = "#ca8a04"
 
     return {
         "decision": decision,

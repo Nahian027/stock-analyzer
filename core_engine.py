@@ -50,12 +50,12 @@ def get_accurate_next_move(df_daily: pd.DataFrame, ticker: str = "") -> Dict[str
         return {
             "direction_text": "কনসলিডেশন (Range)",
             "icon": "⚖️",
-            "color": "#0284c7",
+            "color": "#d97706",
             "target_price": 0.0,
             "delta_pct": "+0.0%",
             "formatted_html": """<div style="display: flex; justify-content: space-between; align-items: center; font-size: 13.5px; font-weight: 600;">
   <span style="color: #4A5568;">🔮 গতিপথ (Directional Bias):</span>
-  <span style="color: #0284c7;">
+  <span style="color: #d97706;">
     ⚖️ কনসলিডেশন (Range)
   </span>
 </div>"""
@@ -119,7 +119,7 @@ def get_accurate_next_move(df_daily: pd.DataFrame, ticker: str = "") -> Dict[str
     if is_bullish:
         direction_text = "উর্ধমুখী (Bullish)"
         icon = "📈"
-        color = "#00875A"  # Institutional Green
+        color = "#16a34a"  # Institutional Green (BUY)
         target_price = res_target
         delta_pts = round(target_price - close, 2)
         delta_pct_num = round((delta_pts / (close + 1e-9)) * 100, 2)
@@ -128,7 +128,7 @@ def get_accurate_next_move(df_daily: pd.DataFrame, ticker: str = "") -> Dict[str
     elif is_bearish:
         direction_text = "নিম্নমুখী (Bearish)"
         icon = "📉"
-        color = "#DE350B"  # Institutional Red
+        color = "#dc2626"  # Institutional Red (SELL)
         target_price = sup_target
         delta_pts = round(target_price - close, 2)
         delta_pct_num = round((delta_pts / (close + 1e-9)) * 100, 2)
@@ -137,7 +137,7 @@ def get_accurate_next_move(df_daily: pd.DataFrame, ticker: str = "") -> Dict[str
     else:
         direction_text = "কনসলিডেশন (Range)"
         icon = "⚖️"
-        color = "#0284c7"  # Deep Blue
+        color = "#d97706"  # Yellow / Amber (HOLD)
         target_price = res_target
         delta_pts = round(target_price - close, 2)
         delta_pct_num = round((delta_pts / (close + 1e-9)) * 100, 2)
